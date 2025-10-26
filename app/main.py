@@ -246,20 +246,52 @@ def parse_tasks_from_actions(actions_text: str):
     return tasks
 
 # 追加：タスクのSlackブロック（画像2の「アクションアイテム&タスク」風）
-def build_tasks_blocks(d: Draft):
+def build_tasks_blocks(d: Draft, draft_id: str = ""):
     tasks = parse_tasks_from_actions(d.actions)
     if not tasks:
         return [{"type":"section","text":{"type":"mrkdwn","text":"アクションアイテムは登録されていません。"}}]
-    rows = []
-    for t in tasks:
-        who = f"担当：{t['assignee']}" if t.get("assignee") else "担当：未設定"
-        due = f"（期限：{t['due']}）" if t.get("due") else ""
-        line = f"□ {t['title']}  —  {who}{due}"
-        rows.append(line)
-    return [
-        {"type":"header","text":{"type":"plain_text","text":"アクションアイテム＆タスク"}} ,
-        {"type":"section","text":{"type":"mrkdwn","text":"\n".join(rows)}},
+    
+    # 各タスクを個別のセクションブロックとして表示
+    blocks = [
+        {"type":"header","text":{"type":"plain_text","text":"✅ アクションアイテム＆タスク"}},
     ]
+    
+    for i, t in enumerate(tasks):
+        task_value = f"{draft_id}:{i}" if draft_id else str(i)
+        # 担当者と期限のフィールド
+        fields = []
+        if t.get("assignee"):
+            fields.append({"type":"mrkdwn","text":f"*担当:*\n{t['assignee']}"})
+        if t.get("due"):
+            fields.append({"type":"mrkdwn","text":f"*期限:*\n{t['due']}"})
+        
+        # チェックボックス付きセクションブロック
+        text = f"☐ {t['title']}"
+        if fields:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": text},
+                "fields": fields,
+                "accessory": {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "完了"},
+                    "value": task_value,
+                    "action_id": "task_complete",
+                }
+            })
+        else:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": text},
+                "accessory": {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "完了"},
+                    "value": task_value,
+                    "action_id": "task_complete",
+                }
+            })
+    
+    return blocks
 
 def post_slack_draft(channel_id: str, draft_id: str, title: str, d: Draft):
     blocks = build_minutes_preview_blocks(draft_id, d)   # ← ここを差し替え
@@ -388,7 +420,7 @@ async def create_pdf_async(d: Draft, out_path: Path):
     # ---- タイトル
     y = PAGE_H - MARGIN_T
     c.setFont(FONT_NAME, TITLE_SIZE)
-    title_text = f"議事録：{d.title}"
+    title_text = f"議事録：{d.meeting_name or d.title or '（無題）'}"
     c.drawString(MARGIN_L, y, title_text)
 
     # ---- 本文
@@ -397,11 +429,29 @@ async def create_pdf_async(d: Draft, out_path: Path):
 
     max_text_width = PAGE_W - (MARGIN_L + MARGIN_R)
 
+    # メタ情報（会議名、日時、参加者、目的）
+    if d.meeting_name or d.datetime_str or d.participants or d.purpose:
+        c.setFont(FONT_NAME, BODY_SIZE)
+        if d.meeting_name:
+            c.drawString(MARGIN_L + 18, y, f"会議名: {d.meeting_name}")
+            y -= LINE_GAP
+        if d.datetime_str:
+            c.drawString(MARGIN_L + 18, y, f"日時: {d.datetime_str}")
+            y -= LINE_GAP
+        if d.participants:
+            c.drawString(MARGIN_L + 18, y, f"参加者: {d.participants}")
+            y -= LINE_GAP
+        if d.purpose:
+            c.drawString(MARGIN_L + 18, y, f"目的: {d.purpose}")
+            y -= LINE_GAP
+        y -= SECTION_GAP
+
     sections = [
         ("Summary", d.summary),
         ("Decision", d.decisions),
         ("Action",  d.actions),
         ("Issue",   d.issues),
+        ("Risk",    d.risks),
     ]
 
     for label, text in sections:
@@ -698,7 +748,7 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
             try:
                 client_slack.chat_postMessage(
                     channel=channel, thread_ts=ts,
-                    blocks=build_tasks_blocks(d),
+                    blocks=build_tasks_blocks(d, draft_id),
                     text="アクションアイテム＆タスク"
                 )
             except Exception as e:
