@@ -263,9 +263,15 @@ def build_tasks_blocks(d: Draft):
 
 def post_slack_draft(channel_id: str, draft_id: str, title: str, d: Draft):
     blocks = build_minutes_preview_blocks(draft_id, d)   # ← ここを差し替え
-    resp = client_slack.chat_postMessage(channel=channel_id, text="議事録 下書き", blocks=blocks)
-    DRAFT_META[draft_id] = {"channel": channel_id, "ts": resp["ts"]}
-    return resp
+    try:
+        resp = client_slack.chat_postMessage(channel=channel_id, text="議事録 下書き", blocks=blocks)
+        DRAFT_META[draft_id] = {"channel": channel_id, "ts": resp["ts"]}
+        return resp
+    except Exception as e:
+        print(f"[Slack] Post draft failed for channel {channel_id}: {e}")
+        # channel_idが不正な場合は空のchannel_idを設定してDRAFT_METAに保存
+        DRAFT_META[draft_id] = {"channel": "", "ts": ""}
+        raise
 
 def build_edit_modal(draft_id: str, d: Draft):
     return {
