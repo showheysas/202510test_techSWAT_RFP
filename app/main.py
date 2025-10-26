@@ -276,16 +276,24 @@ def build_edit_modal(draft_id: str, d: Draft):
         "submit": {"type": "plain_text", "text": "保存"},
         "close": {"type": "plain_text", "text": "キャンセル"},
         "blocks": [
-            {"type":"input","block_id":"title","label":{"type":"plain_text","text":"タイトル"},
-             "element":{"type":"plain_text_input","action_id":"inp","initial_value":d.title[:300]}},
-            {"type":"input","block_id":"summary","label":{"type":"plain_text","text":"Summary"},
+            {"type":"input","block_id":"meeting_name","label":{"type":"plain_text","text":"会議名"},
+             "element":{"type":"plain_text_input","action_id":"inp","initial_value":d.meeting_name or ""}},
+            {"type":"input","block_id":"datetime_str","label":{"type":"plain_text","text":"日時"},
+             "element":{"type":"plain_text_input","action_id":"inp","initial_value":d.datetime_str or ""}},
+            {"type":"input","block_id":"participants","label":{"type":"plain_text","text":"参加者"},
+             "element":{"type":"plain_text_input","action_id":"inp","initial_value":d.participants or ""}},
+            {"type":"input","block_id":"purpose","label":{"type":"plain_text","text":"目的"},
+             "element":{"type":"plain_text_input","action_id":"inp","multiline":True,"initial_value":d.purpose or ""}},
+            {"type":"input","block_id":"summary","label":{"type":"plain_text","text":"サマリー"},
              "element":{"type":"plain_text_input","action_id":"inp","multiline":True,"initial_value":d.summary}},
-            {"type":"input","block_id":"decisions","label":{"type":"plain_text","text":"Decision"},
+            {"type":"input","block_id":"decisions","label":{"type":"plain_text","text":"決定事項"},
              "element":{"type":"plain_text_input","action_id":"inp","multiline":True,"initial_value":d.decisions}},
-            {"type":"input","block_id":"actions","label":{"type":"plain_text","text":"Action"},
-             "element":{"type":"plain_text_input","action_id":"inp","multiline":True,"initial_value":d.actions}},
-            {"type":"input","block_id":"issues","label":{"type":"plain_text","text":"Issue"},
+            {"type":"input","block_id":"issues","label":{"type":"plain_text","text":"未決定事項"},
              "element":{"type":"plain_text_input","action_id":"inp","multiline":True,"initial_value":d.issues}},
+            {"type":"input","block_id":"actions","label":{"type":"plain_text","text":"アクション"},
+             "element":{"type":"plain_text_input","action_id":"inp","multiline":True,"initial_value":d.actions}},
+            {"type":"input","block_id":"risks","label":{"type":"plain_text","text":"リスク"},
+             "element":{"type":"plain_text_input","action_id":"inp","multiline":True,"initial_value":d.risks or ""}},
         ]
     }
 
@@ -437,7 +445,9 @@ def create_design_checklist_pdf(out_path: Path, d: Draft):
 
     y = PAGE_H - MARGIN_T
     y = draw_title("設計チェックリスト", y)
-    y = draw_head("会議名", d.meeting_name or d.title);   y = draw_head("日時", d.datetime_str);  y = draw_head("目的", d.purpose)
+    y = draw_head("会議名", d.meeting_name or d.title, y)
+    y = draw_head("日時", d.datetime_str, y)
+    y = draw_head("目的", d.purpose, y)
     y -= 6
 
     # DoR
@@ -692,11 +702,16 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
         draft_id = payload["view"]["private_metadata"]
         state = payload["view"]["state"]["values"]
         updated = Draft(
-            title=state["title"]["inp"]["value"],
-            summary=state["summary"]["inp"]["value"],
-            decisions=state["decisions"]["inp"]["value"],
-            actions=state["actions"]["inp"]["value"],
-            issues=state["issues"]["inp"]["value"],
+            title="",
+            summary=state.get("summary", {}).get("inp", {}).get("value", ""),
+            decisions=state.get("decisions", {}).get("inp", {}).get("value", ""),
+            actions=state.get("actions", {}).get("inp", {}).get("value", ""),
+            issues=state.get("issues", {}).get("inp", {}).get("value", ""),
+            meeting_name=state.get("meeting_name", {}).get("inp", {}).get("value", ""),
+            datetime_str=state.get("datetime_str", {}).get("inp", {}).get("value", ""),
+            participants=state.get("participants", {}).get("inp", {}).get("value", ""),
+            purpose=state.get("purpose", {}).get("inp", {}).get("value", ""),
+            risks=state.get("risks", {}).get("inp", {}).get("value", ""),
         )
         save_json(SUMM_DIR / f"{draft_id}.json", updated.dict())
         meta = DRAFT_META.get(draft_id, {})
