@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Environment variables
+.env
+
+# Data directories
+app/data/uploads/
+app/data/transcripts/
+app/data/summaries/
+app/data/pdf/
+data/uploads/
+data/transcripts/
+data/summaries/
+
+# Credentials
+token.json
+*.json
+!requirements.txt
+!package*.json
+
+# Backup files
+**/*_bu*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
