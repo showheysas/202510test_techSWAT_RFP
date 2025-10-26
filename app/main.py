@@ -642,12 +642,15 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
 
             # --- ③ Gmail送信 ---
             if GMAIL_USER and GMAIL_PASS:
-                send_via_gmail(
-                    GMAIL_USER, GMAIL_PASS, GMAIL_USER,
-                    f"[議事録承認] {d.title}",
-                    "承認済み議事録を添付します。",
-                    pdf_path
-                )
+                try:
+                    send_via_gmail(
+                        GMAIL_USER, GMAIL_PASS, GMAIL_USER,
+                        f"[議事録承認] {d.title}",
+                        "承認済み議事録を添付します。",
+                        pdf_path
+                    )
+                except Exception as e:
+                    print(f"[Gmail] Send failed: {e}")
 
             # --- ④ Drive保存（リンク取得） ---
             drive_file = None
