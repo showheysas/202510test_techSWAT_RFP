@@ -575,7 +575,9 @@ async def upload_audio(
     title: str = Form(""),
     channel_id: Optional[str] = Form(None),
 ):
-    if not channel_id and not DEFAULT_SLACK_CHANNEL:
+    # channel_idがNoneまたは空文字列で、DEFAULT_SLACK_CHANNELも空文字列の場合はエラー
+    effective_channel = channel_id or DEFAULT_SLACK_CHANNEL
+    if not effective_channel or effective_channel.strip() == "":
         raise HTTPException(status_code=400, detail="Slack投稿先が不明です。")
 
     draft_id = uuid.uuid4().hex
@@ -592,7 +594,7 @@ async def upload_audio(
     file_time = time.localtime(min(created_time, modified_time))
     datetime_str = time.strftime("%Y年%m月%d日 | %H:%M", file_time)
 
-    background.add_task(process_pipeline, draft_id, raw_path, title or audio.filename, channel_id or DEFAULT_SLACK_CHANNEL, datetime_str)
+    background.add_task(process_pipeline, draft_id, raw_path, title or audio.filename, effective_channel, datetime_str)
     return {"accepted": True, "draft_id": draft_id}
 
 def process_pipeline(draft_id: str, raw_path: Path, title: str, channel_id: str, datetime_str: str):
