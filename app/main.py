@@ -623,10 +623,13 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
         if action_id == "approve":
             # --- Slack更新（承認済み表示）---
             meta = DRAFT_META.get(draft_id, {})
-            channel = meta.get("channel") or payload["channel"]["id"]
-            ts = meta.get("ts") or payload["message"]["ts"]
+            channel = meta.get("channel") or payload.get("channel", {}).get("id") or DEFAULT_SLACK_CHANNEL
+            if not channel:
+                return {"ok": False, "error": "チャンネルIDが取得できませんでした"}
+            ts = meta.get("ts") or payload.get("message", {}).get("ts")
             approved_blocks = [{"type":"section","text":{"type":"mrkdwn","text":"*✅ 承認済み議事録*"}}] + build_minutes_preview_blocks(draft_id, d)[:-1]
-            client_slack.chat_update(channel=channel, ts=ts, text="承認済み議事録", blocks=approved_blocks)
+            if ts:
+                client_slack.chat_update(channel=channel, ts=ts, text="承認済み議事録", blocks=approved_blocks)
             client_slack.chat_postMessage(channel=channel, thread_ts=ts, text="PDF化・メール送信・Drive保存を実行中...")
 
             # --- ① 議事録PDF（既存）
