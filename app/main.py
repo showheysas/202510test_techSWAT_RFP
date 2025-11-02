@@ -26,12 +26,10 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
-from google.auth.transport.requests import Request as GoogleAuthRequest
 
 # =========================
 # 初期化
@@ -45,9 +43,10 @@ DEFAULT_SLACK_CHANNEL = os.getenv("SLACK_CHANNEL_ID", "")
 GMAIL_USER = os.getenv("GMAIL_USER", "")
 GMAIL_PASS = os.getenv("GMAIL_PASS", "")
 GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
-GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "")
-# OAuth認証情報（JSONファイルの内容を文字列として設定可能）
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
+# サービスアカウント認証情報（JSONファイルの内容を文字列として設定可能・推奨）
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+# サービスアカウント認証情報（ファイルパス指定）
+GOOGLE_SERVICE_ACCOUNT_PATH = os.getenv("GOOGLE_SERVICE_ACCOUNT_PATH", "")
 
 # Notta Google Drive連携
 NOTTA_DRIVE_FOLDER_ID = os.getenv("NOTTA_DRIVE_FOLDER_ID", "")
@@ -563,7 +562,7 @@ def send_via_gmail(sender, password, to, subject, body, attach_path: Path):
 # --- Google Drive API共通関数 ---
 def get_drive_service(scope: str = "drive.file"):
     """
-    Google Drive APIクライアントを取得
+    Google Drive APIクライアントを取得（サービスアカウント認証）
     scope: "drive.file" (作成したファイルのみ) または "drive.readonly" (読み取り専用) または "drive" (読み書き)
     """
     if scope == "drive.file":
@@ -573,63 +572,41 @@ def get_drive_service(scope: str = "drive.file"):
     else:
         SCOPES = ["https://www.googleapis.com/auth/drive"]
     
-    creds = None
-    token_path = "token.json"
-    
-    print(f"[Drive] Checking token file: {token_path}")
-    if os.path.exists(token_path):
-        print("[Drive] Loading existing token...")
-        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-    
-    if not creds or not creds.valid:
-        print("[Drive] Token invalid or expired, refreshing...")
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(GoogleAuthRequest())
-                print("[Drive] Token refreshed successfully")
-            except Exception as e:
-                print(f"[Drive] Token refresh failed: {e}")
-                creds = None
-        
-        if not creds:
-            print("[Drive] Starting OAuth flow...")
-            try:
-                # 環境変数からJSONを読み込む方法を優先
-                if GOOGLE_CREDENTIALS_JSON:
-                    print("[Drive] Using credentials from GOOGLE_CREDENTIALS_JSON environment variable")
-                    client_secrets = json.loads(GOOGLE_CREDENTIALS_JSON)
-                    flow = InstalledAppFlow.from_client_secrets_dict(client_secrets, SCOPES)
-                elif GOOGLE_CREDENTIALS_PATH:
-                    # 既存の方法：ファイルから読み込む
-                    print(f"[Drive] Using credentials from file: {GOOGLE_CREDENTIALS_PATH}")
-                    if os.path.exists(GOOGLE_CREDENTIALS_PATH):
-                        flow = InstalledAppFlow.from_client_secrets_file(GOOGLE_CREDENTIALS_PATH, SCOPES)
-                    else:
-                        raise FileNotFoundError(f"Credentials file not found: {GOOGLE_CREDENTIALS_PATH}")
-                else:
-                    raise RuntimeError("GOOGLE_CREDENTIALS_JSON or GOOGLE_CREDENTIALS_PATH must be set")
-                
-                # Azure App Serviceではブラウザが開けないため、認証URLをログに出力
-                auth_url, _ = flow.authorization_url(prompt='consent')
-                print(f"[Drive] OAuth認証が必要です。以下のURLにアクセスして認証を行ってください:")
-                print(f"[Drive] {auth_url}")
-                print("[Drive] 認証後、表示される認証コードを入力するか、token.jsonを事前に配置してください。")
-                # 自動化のため、事前にtoken.jsonを配置することを推奨
-                raise RuntimeError("OAuth認証が必要です。事前にtoken.jsonを配置してください。")
-            except Exception as e:
-                print(f"[Drive] OAuth flow failed: {e}")
-                raise
-        
-        print("[Drive] Saving token...")
-        with open(token_path, "w") as token:
-            token.write(creds.to_json())
-    
     try:
+        print("[Drive] Initializing service account credentials...")
+        
+        # 方法1: 環境変数からJSONを読み込む（推奨）
+        if GOOGLE_SERVICE_ACCOUNT_JSON:
+            print("[Drive] Using credentials from GOOGLE_SERVICE_ACCOUNT_JSON environment variable")
+            try:
+                service_account_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+                creds = service_account.Credentials.from_service_account_info(
+                    service_account_info,
+                    scopes=SCOPES
+                )
+                print("[Drive] Service account credentials loaded from JSON string")
+            except json.JSONDecodeError as e:
+                print(f"[Drive] Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
+                raise ValueError(f"Invalid JSON in GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
+        # 方法2: ファイルパスから読み込む
+        elif GOOGLE_SERVICE_ACCOUNT_PATH:
+            print(f"[Drive] Using credentials from file: {GOOGLE_SERVICE_ACCOUNT_PATH}")
+            if not os.path.exists(GOOGLE_SERVICE_ACCOUNT_PATH):
+                raise FileNotFoundError(f"Service account file not found: {GOOGLE_SERVICE_ACCOUNT_PATH}")
+            creds = service_account.Credentials.from_service_account_file(
+                GOOGLE_SERVICE_ACCOUNT_PATH,
+                scopes=SCOPES
+            )
+            print("[Drive] Service account credentials loaded from file")
+        else:
+            raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_PATH must be set")
+        
         print("[Drive] Building Drive service...")
         service = build("drive", "v3", credentials=creds)
+        print("[Drive] Drive service initialized successfully")
         return service
     except Exception as e:
-        print(f"[Drive] Service build failed: {e}")
+        print(f"[Drive] Failed to initialize Drive service: {e}")
         raise
 
 # --- Google Drive保存（リンク返却 & 共有ドライブ対応） ---
