@@ -8,6 +8,7 @@ import hashlib
 import re
 from pathlib import Path
 from typing import Optional
+from datetime import datetime
 
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Request, Header
 from fastapi.responses import JSONResponse
@@ -45,6 +46,10 @@ GMAIL_USER = os.getenv("GMAIL_USER", "")
 GMAIL_PASS = os.getenv("GMAIL_PASS", "")
 GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
 GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "client_secret_825853050725-pnarvt7cdvbh6dl402fcee0kdko4voum.apps.googleusercontent.com.json")
+
+# Notta Google Drive連携
+NOTTA_DRIVE_FOLDER_ID = os.getenv("NOTTA_DRIVE_FOLDER_ID", "")
+GOOGLE_DRIVE_WATCH_ENABLED = os.getenv("GOOGLE_DRIVE_WATCH_ENABLED", "false").lower() == "true"
 
 DRAFT_META = {}
 
@@ -553,9 +558,19 @@ def send_via_gmail(sender, password, to, subject, body, attach_path: Path):
         s.login(sender, password)
         s.send_message(msg)
 
-# --- Google Drive保存（リンク返却 & 共有ドライブ対応） ---
-def upload_to_drive(file_path: Path):
-    SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+# --- Google Drive API共通関数 ---
+def get_drive_service(scope: str = "drive.file"):
+    """
+    Google Drive APIクライアントを取得
+    scope: "drive.file" (作成したファイルのみ) または "drive.readonly" (読み取り専用) または "drive" (読み書き)
+    """
+    if scope == "drive.file":
+        SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+    elif scope == "drive.readonly":
+        SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+    else:
+        SCOPES = ["https://www.googleapis.com/auth/drive"]
+    
     creds = None
     token_path = "token.json"
     
@@ -591,6 +606,15 @@ def upload_to_drive(file_path: Path):
     try:
         print("[Drive] Building Drive service...")
         service = build("drive", "v3", credentials=creds)
+        return service
+    except Exception as e:
+        print(f"[Drive] Service build failed: {e}")
+        raise
+
+# --- Google Drive保存（リンク返却 & 共有ドライブ対応） ---
+def upload_to_drive(file_path: Path):
+    service = get_drive_service("drive.file")
+    try:
         meta = {"name": file_path.name}
         if GOOGLE_DRIVE_FOLDER_ID:
             meta["parents"] = [GOOGLE_DRIVE_FOLDER_ID]
@@ -610,6 +634,81 @@ def upload_to_drive(file_path: Path):
     except HttpError as e:
         print(f"[Drive] Upload failed: {e}")
         raise
+
+# --- Google Driveからのファイル取得機能 ---
+def get_file_metadata(file_id: str) -> dict:
+    """
+    Google Driveからファイルのメタデータを取得
+    """
+    service = get_drive_service("drive.readonly")
+    try:
+        file = service.files().get(
+            fileId=file_id,
+            fields="id, name, createdTime, modifiedTime, mimeType, size, parents",
+            supportsAllDrives=True
+        ).execute()
+        print(f"[Drive] File metadata retrieved: {file.get('name')}")
+        return file
+    except HttpError as e:
+        print(f"[Drive] Failed to get file metadata: {e}")
+        raise
+
+def download_text_from_drive(file_id: str) -> str:
+    """
+    Google Driveからテキストファイルの内容をダウンロード
+    """
+    service = get_drive_service("drive.readonly")
+    try:
+        # テキストファイルの内容を取得
+        request = service.files().get_media(fileId=file_id)
+        from io import BytesIO
+        from googleapiclient.http import MediaIoBaseDownload
+        
+        fh = BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        
+        fh.seek(0)
+        content = fh.read().decode('utf-8')
+        print(f"[Drive] Text file downloaded: {len(content)} characters")
+        return content
+    except HttpError as e:
+        print(f"[Drive] Failed to download text file: {e}")
+        raise
+
+def is_file_processed(file_name: str) -> bool:
+    """
+    ファイル名から処理済みかどうかを判定
+    「_processed_」プレフィックスが含まれている場合は処理済みと判定
+    """
+    if not file_name:
+        return False
+    return file_name.startswith("_processed_")
+
+def mark_file_as_processed(file_id: str, original_name: str) -> bool:
+    """
+    ファイル名に「_processed_」プレフィックスを追加して処理済みをマーク
+    """
+    if is_file_processed(original_name):
+        print(f"[Drive] File already processed: {original_name}")
+        return True
+    
+    new_name = f"_processed_{original_name}"
+    service = get_drive_service("drive")
+    try:
+        file = service.files().update(
+            fileId=file_id,
+            body={"name": new_name},
+            fields="id, name",
+            supportsAllDrives=True
+        ).execute()
+        print(f"[Drive] File renamed to: {file.get('name')}")
+        return True
+    except HttpError as e:
+        print(f"[Drive] Failed to rename file: {e}")
+        return False
 
 # =========================
 # FastAPIエンドポイント
@@ -647,13 +746,101 @@ async def upload_audio(
     background.add_task(process_pipeline, draft_id, raw_path, title or audio.filename, effective_channel, datetime_str)
     return {"accepted": True, "draft_id": draft_id}
 
+@app.post("/process-drive-file")
+async def process_drive_file(
+    background: BackgroundTasks,
+    file_id: str = Form(...),
+    channel_id: Optional[str] = Form(None),
+):
+    """
+    Google DriveのファイルIDを指定して、テキストファイルを処理（テスト用）
+    """
+    # channel_idがNoneまたは空文字列で、DEFAULT_SLACK_CHANNELも空文字列の場合はエラー
+    effective_channel = channel_id or DEFAULT_SLACK_CHANNEL
+    if not effective_channel or effective_channel.strip() == "":
+        raise HTTPException(status_code=400, detail="Slack投稿先が不明です。")
+    
+    if not NOTTA_DRIVE_FOLDER_ID:
+        raise HTTPException(status_code=400, detail="NOTTA_DRIVE_FOLDER_ID が未設定です。")
+    
+    draft_id = uuid.uuid4().hex
+    
+    background.add_task(process_drive_file_task, draft_id, file_id, effective_channel)
+    return {"accepted": True, "draft_id": draft_id, "file_id": file_id}
+
+def process_drive_file_task(draft_id: str, file_id: str, channel_id: str):
+    """
+    Google Driveのファイルを処理するバックグラウンドタスク
+    """
+    try:
+        # 1. ファイルメタデータを取得
+        print(f"[Drive] Processing file ID: {file_id}")
+        metadata = get_file_metadata(file_id)
+        file_name = metadata.get("name", "")
+        created_time = metadata.get("createdTime", "")
+        modified_time = metadata.get("modifiedTime", created_time)
+        
+        # 2. 処理済みかチェック
+        if is_file_processed(file_name):
+            print(f"[Drive] File already processed: {file_name}")
+            return
+        
+        # 3. ファイル名から日時を抽出（ファイル名に日時が含まれている場合）
+        # またはファイルの作成日時を使用
+        datetime_str = ""
+        if created_time:
+            try:
+                dt = datetime.fromisoformat(created_time.replace("Z", "+00:00"))
+                datetime_str = dt.strftime("%Y年%m月%d日 | %H:%M")
+            except Exception as e:
+                print(f"[Drive] Failed to parse datetime: {e}")
+                datetime_str = time.strftime("%Y年%m月%d日 | %H:%M", time.localtime())
+        else:
+            datetime_str = time.strftime("%Y年%m月%d日 | %H:%M", time.localtime())
+        
+        # 4. テキストファイルをダウンロード
+        text = download_text_from_drive(file_id)
+        
+        if not text or not text.strip():
+            print(f"[Drive] Empty text file: {file_id}")
+            return
+        
+        # 5. ファイル名からタイトルを生成（拡張子を除く）
+        title = Path(file_name).stem if file_name else "議事録"
+        
+        # 6. テキストを処理
+        process_text_pipeline(draft_id, text, title, channel_id, datetime_str)
+        
+        # 7. 処理完了後、ファイル名を変更
+        mark_file_as_processed(file_id, file_name)
+        
+        print(f"[Drive] File processed successfully: {file_id}")
+        
+    except HttpError as e:
+        print(f"[Drive] Error processing file {file_id}: {e}")
+        raise
+    except Exception as e:
+        print(f"[Drive] Unexpected error processing file {file_id}: {e}")
+        raise
+
 def process_pipeline(draft_id: str, raw_path: Path, title: str, channel_id: str, datetime_str: str):
+    """音声ファイルからテキストを抽出して処理"""
     text = transcribe_audio(raw_path)
     trans_path = TRANS_DIR / f"{draft_id}.txt"
     trans_path.write_text(text, encoding="utf-8")
     draft = summarize_to_structured(text)
     draft.title = title.strip()[:200]
     draft.datetime_str = datetime_str  # 音声ファイルの保存日時を設定
+    save_json(SUMM_DIR / f"{draft_id}.json", draft.dict())
+    post_slack_draft(channel_id, draft_id, draft.title, draft)
+
+def process_text_pipeline(draft_id: str, text: str, title: str, channel_id: str, datetime_str: str):
+    """テキストを直接受け取って処理（Nottaからの文字起こしテキスト用）"""
+    trans_path = TRANS_DIR / f"{draft_id}.txt"
+    trans_path.write_text(text, encoding="utf-8")
+    draft = summarize_to_structured(text)
+    draft.title = title.strip()[:200]
+    draft.datetime_str = datetime_str
     save_json(SUMM_DIR / f"{draft_id}.json", draft.dict())
     post_slack_draft(channel_id, draft_id, draft.title, draft)
 
