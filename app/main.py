@@ -648,7 +648,28 @@ def get_file_metadata(file_id: str) -> dict:
         print(f"[Drive] File metadata retrieved: {file.get('name')}")
         return file
     except HttpError as e:
-        print(f"[Drive] Failed to get file metadata: {e}")
+        error_details = e.error_details if hasattr(e, 'error_details') else str(e)
+        if e.resp.status == 404:
+            print(f"[Drive] File not found: {file_id}")
+            print(f"[Drive] サービスアカウントにファイルへのアクセス権限がない可能性があります。")
+            # サービスアカウントのメールアドレスを取得して表示
+            try:
+                if GOOGLE_SERVICE_ACCOUNT_JSON:
+                    service_account_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+                    service_account_email = service_account_info.get("client_email", "")
+                    print(f"[Drive] ファイルをサービスアカウント ({service_account_email}) に共有してください。")
+                elif GOOGLE_SERVICE_ACCOUNT_PATH and os.path.exists(GOOGLE_SERVICE_ACCOUNT_PATH):
+                    with open(GOOGLE_SERVICE_ACCOUNT_PATH, 'r', encoding='utf-8') as f:
+                        service_account_info = json.load(f)
+                        service_account_email = service_account_info.get("client_email", "")
+                        print(f"[Drive] ファイルをサービスアカウント ({service_account_email}) に共有してください。")
+                else:
+                    print(f"[Drive] ファイルをサービスアカウントに共有してください。")
+            except Exception:
+                print(f"[Drive] ファイルをサービスアカウントに共有してください。")
+        else:
+            print(f"[Drive] Failed to get file metadata: {e}")
+            print(f"[Drive] Error details: {error_details}")
         raise
 
 def download_text_from_drive(file_id: str) -> str:
@@ -897,11 +918,10 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
 
             # --- ④ Drive保存（リンク取得） ---
             drive_file = None
-            print(f"[Drive] GOOGLE_CREDENTIALS_PATH: {GOOGLE_CREDENTIALS_PATH}")
-            print(f"[Drive] GOOGLE_DRIVE_FOLDER_ID: {GOOGLE_DRIVE_FOLDER_ID}")
-            print(f"[Drive] credentials.json exists: {os.path.exists(GOOGLE_CREDENTIALS_PATH)}")
+            # サービスアカウント認証情報が設定されているかチェック
+            has_service_account = bool(GOOGLE_SERVICE_ACCOUNT_JSON) or (GOOGLE_SERVICE_ACCOUNT_PATH and os.path.exists(GOOGLE_SERVICE_ACCOUNT_PATH))
             
-            if os.path.exists(GOOGLE_CREDENTIALS_PATH):
+            if has_service_account:
                 try:
                     print("[Drive] Starting upload...")
                     drive_file = upload_to_drive(pdf_path)
@@ -910,7 +930,7 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
                     print(f"[Drive] Upload failed with exception: {e}")
                     drive_file = None
             else:
-                print("[Drive] credentials.json not found, skipping Drive upload")
+                print("[Drive] Service account credentials not found, skipping Drive upload")
 
             # --- ⑤ SlackへPDFを2点とも添付 ---
             try:
