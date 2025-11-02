@@ -921,16 +921,27 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
             # サービスアカウント認証情報が設定されているかチェック
             has_service_account = bool(GOOGLE_SERVICE_ACCOUNT_JSON) or (GOOGLE_SERVICE_ACCOUNT_PATH and os.path.exists(GOOGLE_SERVICE_ACCOUNT_PATH))
             
+            print(f"[Drive] Checking service account configuration...")
+            print(f"[Drive] GOOGLE_SERVICE_ACCOUNT_JSON: {'set' if GOOGLE_SERVICE_ACCOUNT_JSON else 'not set'}")
+            print(f"[Drive] GOOGLE_SERVICE_ACCOUNT_PATH: {GOOGLE_SERVICE_ACCOUNT_PATH}")
+            print(f"[Drive] GOOGLE_DRIVE_FOLDER_ID: {GOOGLE_DRIVE_FOLDER_ID}")
+            print(f"[Drive] has_service_account: {has_service_account}")
+            
             if has_service_account:
                 try:
                     print("[Drive] Starting upload...")
                     drive_file = upload_to_drive(pdf_path)
                     print(f"[Drive] Upload successful: {drive_file}")
+                    if drive_file and "webViewLink" in drive_file:
+                        print(f"[Drive] PDF uploaded to: {drive_file.get('webViewLink')}")
                 except Exception as e:
                     print(f"[Drive] Upload failed with exception: {e}")
+                    import traceback
+                    print(f"[Drive] Traceback: {traceback.format_exc()}")
                     drive_file = None
             else:
                 print("[Drive] Service account credentials not found, skipping Drive upload")
+                print("[Drive] Please set GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_PATH in Azure App Service settings")
 
             # --- ⑤ SlackへPDFを2点とも添付 ---
             try:
