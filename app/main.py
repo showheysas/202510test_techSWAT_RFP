@@ -45,7 +45,9 @@ DEFAULT_SLACK_CHANNEL = os.getenv("SLACK_CHANNEL_ID", "")
 GMAIL_USER = os.getenv("GMAIL_USER", "")
 GMAIL_PASS = os.getenv("GMAIL_PASS", "")
 GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
-GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "client_secret_825853050725-pnarvt7cdvbh6dl402fcee0kdko4voum.apps.googleusercontent.com.json")
+GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "")
+# OAuth認証情報（JSONファイルの内容を文字列として設定可能）
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
 
 # Notta Google Drive連携
 NOTTA_DRIVE_FOLDER_ID = os.getenv("NOTTA_DRIVE_FOLDER_ID", "")
@@ -592,9 +594,28 @@ def get_drive_service(scope: str = "drive.file"):
         if not creds:
             print("[Drive] Starting OAuth flow...")
             try:
-                flow = InstalledAppFlow.from_client_secrets_file(GOOGLE_CREDENTIALS_PATH, SCOPES)
-                creds = flow.run_local_server(port=0)
-                print("[Drive] OAuth flow completed")
+                # 環境変数からJSONを読み込む方法を優先
+                if GOOGLE_CREDENTIALS_JSON:
+                    print("[Drive] Using credentials from GOOGLE_CREDENTIALS_JSON environment variable")
+                    client_secrets = json.loads(GOOGLE_CREDENTIALS_JSON)
+                    flow = InstalledAppFlow.from_client_secrets_dict(client_secrets, SCOPES)
+                elif GOOGLE_CREDENTIALS_PATH:
+                    # 既存の方法：ファイルから読み込む
+                    print(f"[Drive] Using credentials from file: {GOOGLE_CREDENTIALS_PATH}")
+                    if os.path.exists(GOOGLE_CREDENTIALS_PATH):
+                        flow = InstalledAppFlow.from_client_secrets_file(GOOGLE_CREDENTIALS_PATH, SCOPES)
+                    else:
+                        raise FileNotFoundError(f"Credentials file not found: {GOOGLE_CREDENTIALS_PATH}")
+                else:
+                    raise RuntimeError("GOOGLE_CREDENTIALS_JSON or GOOGLE_CREDENTIALS_PATH must be set")
+                
+                # Azure App Serviceではブラウザが開けないため、認証URLをログに出力
+                auth_url, _ = flow.authorization_url(prompt='consent')
+                print(f"[Drive] OAuth認証が必要です。以下のURLにアクセスして認証を行ってください:")
+                print(f"[Drive] {auth_url}")
+                print("[Drive] 認証後、表示される認証コードを入力するか、token.jsonを事前に配置してください。")
+                # 自動化のため、事前にtoken.jsonを配置することを推奨
+                raise RuntimeError("OAuth認証が必要です。事前にtoken.jsonを配置してください。")
             except Exception as e:
                 print(f"[Drive] OAuth flow failed: {e}")
                 raise
