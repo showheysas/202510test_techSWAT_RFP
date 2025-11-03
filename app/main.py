@@ -623,7 +623,8 @@ def get_drive_service(scope: str = "drive.file"):
 
 # --- Google Drive保存（リンク返却 & 共有ドライブ対応） ---
 def upload_to_drive(file_path: Path):
-    service = get_drive_service("drive.file")
+    # 共有フォルダにアクセスするため、"drive"スコープ（フルアクセス）を使用
+    service = get_drive_service("drive")
     try:
         # サービスアカウントのメールアドレスを取得
         if GOOGLE_SERVICE_ACCOUNT_JSON:
