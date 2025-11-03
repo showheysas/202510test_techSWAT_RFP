@@ -1057,18 +1057,33 @@ async def webhook_drive(request: Request, background: BackgroundTasks):
     Google Drive Push通知のWebhookエンドポイント
     """
     try:
+        # リクエストヘッダーをログに記録
+        headers = dict(request.headers)
+        print(f"[Drive Webhook] Received request: {request.method} {request.url.path}")
+        print(f"[Drive Webhook] Headers: {headers}")
+        sys.stdout.flush()
+        
         # リクエストボディを取得
         body = await request.body()
+        print(f"[Drive Webhook] Body length: {len(body)} bytes")
+        if body:
+            print(f"[Drive Webhook] Body preview: {body[:500].decode('utf-8', errors='ignore')}")
+        sys.stdout.flush()
         
         # JSONとして解析
         try:
             notification = json.loads(body.decode("utf-8"))
-        except json.JSONDecodeError:
-            print("[Drive Webhook] Invalid JSON in request body")
+            print(f"[Drive Webhook] Parsed notification: {json.dumps(notification, indent=2, ensure_ascii=False)}")
+            sys.stdout.flush()
+        except json.JSONDecodeError as e:
+            print(f"[Drive Webhook] Invalid JSON in request body: {e}")
+            sys.stdout.flush()
             return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
         
         # 通知タイプを確認
         notification_type = notification.get("type", "")
+        print(f"[Drive Webhook] Notification type: {notification_type}")
+        sys.stdout.flush()
         
         # 同期通知（初期チャレンジ）
         if notification_type == "sync":
@@ -1077,9 +1092,11 @@ async def webhook_drive(request: Request, background: BackgroundTasks):
             challenge = notification.get("challenge", "")
             if challenge:
                 print(f"[Drive Webhook] Returning challenge: {challenge}")
+                sys.stdout.flush()
                 return JSONResponse(content={"challenge": challenge})
             else:
                 print("[Drive Webhook] No challenge in sync notification")
+                sys.stdout.flush()
                 return JSONResponse(status_code=400, content={"error": "No challenge"})
         
         # 変更通知
@@ -1091,16 +1108,23 @@ async def webhook_drive(request: Request, background: BackgroundTasks):
                 token = notification.get("token", "")
                 if token != GOOGLE_DRIVE_WEBHOOK_SECRET:
                     print("[Drive Webhook] Invalid token")
+                    sys.stdout.flush()
                     return JSONResponse(status_code=403, content={"error": "Invalid token"})
             
             # 変更されたリソースのIDを取得
             resource_id = notification.get("resourceId", "")
             if not resource_id:
                 print("[Drive Webhook] No resourceId in notification")
+                sys.stdout.flush()
                 return JSONResponse(status_code=400, content={"error": "No resourceId"})
+            
+            print(f"[Drive Webhook] Resource ID: {resource_id}")
+            sys.stdout.flush()
             
             # 変更を検出したら、フォルダ内のファイルをチェック
             if NOTTA_DRIVE_FOLDER_ID:
+                print(f"[Drive Webhook] Triggering check for folder: {NOTTA_DRIVE_FOLDER_ID}")
+                sys.stdout.flush()
                 # フォルダ内の新しいファイルを検出して処理
                 background.add_task(check_and_process_new_files, NOTTA_DRIVE_FOLDER_ID)
             
@@ -1109,23 +1133,40 @@ async def webhook_drive(request: Request, background: BackgroundTasks):
         # 不明な通知タイプ
         else:
             print(f"[Drive Webhook] Unknown notification type: {notification_type}")
+            sys.stdout.flush()
             return JSONResponse(status_code=400, content={"error": "Unknown notification type"})
     
     except Exception as e:
         print(f"[Drive Webhook] Error processing notification: {e}")
         import traceback
         print(f"[Drive Webhook] Traceback: {traceback.format_exc()}")
+        sys.stdout.flush()
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.get("/webhook/drive")
+async def webhook_drive_get():
+    """
+    Google Drive Push通知のWebhookエンドポイント（GET - 初期検証用）
+    """
+    print(f"[Drive Webhook] Received GET request")
+    sys.stdout.flush()
+    return JSONResponse(status_code=200, content={"status": "ok", "message": "Webhook endpoint is ready"})
 
 def check_and_process_new_files(folder_id: str):
     """
     フォルダ内の新しいファイルをチェックして処理（バックグラウンドタスク）
     """
     try:
+        print(f"[Drive] Checking new files in folder: {folder_id}")
+        sys.stdout.flush()
+        
         service = get_drive_service("drive.readonly")
         
         # フォルダ内のファイルを一覧取得
         query = f"'{folder_id}' in parents and trashed=false and mimeType='text/plain'"
+        print(f"[Drive] Query: {query}")
+        sys.stdout.flush()
+        
         results = service.files().list(
             q=query,
             fields="files(id, name, createdTime, modifiedTime, mimeType)",
@@ -1137,28 +1178,41 @@ def check_and_process_new_files(folder_id: str):
         
         files = results.get("files", [])
         print(f"[Drive] Found {len(files)} text files in folder")
+        sys.stdout.flush()
         
         # 各ファイルをチェックして処理
+        processed_count = 0
         for file in files:
             file_id = file.get("id")
             file_name = file.get("name", "")
             
             # 既に処理済みか確認
             if is_file_processed(file_name):
+                print(f"[Drive] Skipping processed file: {file_name}")
+                sys.stdout.flush()
                 continue
             
             # 処理を開始
             print(f"[Drive] Processing new file: {file_name} ({file_id})")
+            sys.stdout.flush()
             try:
                 process_drive_file_notification(file_id)
+                processed_count += 1
             except Exception as e:
                 print(f"[Drive] Error processing file {file_id}: {e}")
+                import traceback
+                print(f"[Drive] Traceback: {traceback.format_exc()}")
+                sys.stdout.flush()
                 continue
+        
+        print(f"[Drive] Processed {processed_count} new file(s)")
+        sys.stdout.flush()
         
     except Exception as e:
         print(f"[Drive] Error checking new files: {e}")
         import traceback
         print(f"[Drive] Traceback: {traceback.format_exc()}")
+        sys.stdout.flush()
 
 def process_drive_file_task(draft_id: str, file_id: str, channel_id: str):
     """
