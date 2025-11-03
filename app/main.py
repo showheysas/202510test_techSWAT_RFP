@@ -7,6 +7,7 @@ import time
 import hmac
 import hashlib
 import re
+import asyncio
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
@@ -54,10 +55,14 @@ NOTTA_DRIVE_FOLDER_ID = os.getenv("NOTTA_DRIVE_FOLDER_ID", "")
 GOOGLE_DRIVE_WATCH_ENABLED = os.getenv("GOOGLE_DRIVE_WATCH_ENABLED", "false").lower() == "true"
 # Google Drive Webhook検証用シークレット
 GOOGLE_DRIVE_WEBHOOK_SECRET = os.getenv("GOOGLE_DRIVE_WEBHOOK_SECRET", "")
+# Google Drive ポーリング間隔（秒、デフォルト1分）
+GOOGLE_DRIVE_POLL_INTERVAL = int(os.getenv("GOOGLE_DRIVE_POLL_INTERVAL", "60"))
 
 DRAFT_META = {}
 # Drive Push通知チャンネル情報の保存（メモリ）
 DRIVE_WATCH_CHANNEL_INFO = {}
+# ポーリングタスクの停止フラグ
+_polling_task = None
 
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY が未設定です。")
@@ -951,11 +956,39 @@ def process_drive_file_notification(file_id: str, channel_id: str = None):
 # =========================
 # アプリ起動/停止時の処理
 # =========================
+async def polling_task():
+    """
+    定期的にフォルダ内の新しいファイルをチェックするタスク
+    """
+    global _polling_task
+    print(f"[Drive] Polling task started. Interval: {GOOGLE_DRIVE_POLL_INTERVAL} seconds")
+    sys.stdout.flush()
+    
+    while True:
+        try:
+            await asyncio.sleep(GOOGLE_DRIVE_POLL_INTERVAL)
+            if NOTTA_DRIVE_FOLDER_ID:
+                print(f"[Drive] Polling for new files in folder: {NOTTA_DRIVE_FOLDER_ID}")
+                sys.stdout.flush()
+                # 同期的な関数を非同期で実行
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, check_and_process_new_files, NOTTA_DRIVE_FOLDER_ID)
+        except asyncio.CancelledError:
+            print(f"[Drive] Polling task cancelled")
+            sys.stdout.flush()
+            break
+        except Exception as e:
+            print(f"[Drive] Error in polling task: {e}")
+            import traceback
+            print(f"[Drive] Traceback: {traceback.format_exc()}")
+            sys.stdout.flush()
+
 @app.on_event("startup")
 async def startup_event():
     """
     アプリ起動時にGoogle Drive監視を開始
     """
+    global _polling_task
     if GOOGLE_DRIVE_WATCH_ENABLED and NOTTA_DRIVE_FOLDER_ID:
         try:
             print(f"[Drive] Starting watch for folder: {NOTTA_DRIVE_FOLDER_ID}")
@@ -964,6 +997,17 @@ async def startup_event():
             sys.stdout.flush()
         except Exception as e:
             print(f"[Drive] Failed to start watch: {e}")
+            import traceback
+            print(f"[Drive] Traceback: {traceback.format_exc()}")
+            sys.stdout.flush()
+        
+        # ポーリングタスクを開始（Push通知のバックアップとして）
+        try:
+            _polling_task = asyncio.create_task(polling_task())
+            print(f"[Drive] Polling task started")
+            sys.stdout.flush()
+        except Exception as e:
+            print(f"[Drive] Failed to start polling task: {e}")
             import traceback
             print(f"[Drive] Traceback: {traceback.format_exc()}")
             sys.stdout.flush()
@@ -978,6 +1022,21 @@ async def shutdown_event():
     """
     アプリ停止時にGoogle Drive監視を停止
     """
+    global _polling_task
+    # ポーリングタスクを停止
+    if _polling_task:
+        try:
+            _polling_task.cancel()
+            await _polling_task
+            print(f"[Drive] Polling task stopped")
+            sys.stdout.flush()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"[Drive] Error stopping polling task: {e}")
+            sys.stdout.flush()
+    
+    # Watchチャンネルを停止
     if DRIVE_WATCH_CHANNEL_INFO:
         try:
             for folder_id, channel_info in DRIVE_WATCH_CHANNEL_INFO.items():
