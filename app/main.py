@@ -881,145 +881,206 @@ def process_text_pipeline(draft_id: str, text: str, title: str, channel_id: str,
 
 @app.post("/slack/actions")
 async def slack_actions(request: Request, x_slack_signature: str = Header(default=""), x_slack_request_timestamp: str = Header(default="")):
-    raw = await request.body()
-    verify_slack_signature(raw, x_slack_request_timestamp, x_slack_signature)
-    form = await request.form()
-    payload = json.loads(form["payload"])
-    ptype = payload.get("type")
+    print(f"[SlackActions] ========== Slack Actions Endpoint Called ==========")
+    sys.stdout.flush()
+    try:
+        raw = await request.body()
+        verify_slack_signature(raw, x_slack_request_timestamp, x_slack_signature)
+        form = await request.form()
+        payload = json.loads(form["payload"])
+        ptype = payload.get("type")
+        
+        print(f"[SlackActions] Request type: {ptype}")
+        sys.stdout.flush()
 
-    # --- ボタン ---
-    if ptype == "block_actions":
-        action = payload["actions"][0]
-        action_id = action["action_id"]
-        draft_id = action.get("value")
-        summ_path = SUMM_DIR / f"{draft_id}.json"
-        data = json.loads(summ_path.read_text(encoding="utf-8"))
-        d = Draft(**data)
+        # --- ボタン ---
+        if ptype == "block_actions":
+            action = payload["actions"][0]
+            action_id = action["action_id"]
+            draft_id = action.get("value")
+            
+            print(f"[SlackActions] Action ID: {action_id}, Draft ID: {draft_id}")
+            sys.stdout.flush()
+            
+            summ_path = SUMM_DIR / f"{draft_id}.json"
+            data = json.loads(summ_path.read_text(encoding="utf-8"))
+            d = Draft(**data)
 
-        if action_id == "edit":
-            client_slack.views_open(trigger_id=payload["trigger_id"], view=build_edit_modal(draft_id, d))
-            return JSONResponse({"response_action": "clear"})
+            if action_id == "edit":
+                print(f"[SlackActions] Edit action triggered")
+                sys.stdout.flush()
+                client_slack.views_open(trigger_id=payload["trigger_id"], view=build_edit_modal(draft_id, d))
+                return JSONResponse({"response_action": "clear"})
 
-        if action_id == "approve":
-            # --- Slack更新（承認済み表示）---
-            meta = DRAFT_META.get(draft_id, {})
-            channel = meta.get("channel") or payload.get("channel", {}).get("id") or DEFAULT_SLACK_CHANNEL
-            if not channel:
-                return {"ok": False, "error": "チャンネルIDが取得できませんでした"}
-            ts = meta.get("ts") or payload.get("message", {}).get("ts")
-            approved_blocks = [{"type":"section","text":{"type":"mrkdwn","text":"*✅ 承認済み議事録*"}}] + build_minutes_preview_blocks(draft_id, d)[:-1]
-            if ts:
-                client_slack.chat_update(channel=channel, ts=ts, text="承認済み議事録", blocks=approved_blocks)
-            client_slack.chat_postMessage(channel=channel, thread_ts=ts, text="PDF化・メール送信・Drive保存を実行中...")
-
-            # --- ① 議事録PDF（既存）
-            pdf_path = PDF_DIR / f"{draft_id}.pdf"
-            await create_pdf_async(d, pdf_path)
-
-            # --- ② 設計チェックリストPDF（新規）
-            checklist_path = PDF_DIR / f"{draft_id}_design_checklist.pdf"
-            create_design_checklist_pdf(checklist_path, d)
-
-            # --- ③ Gmail送信 ---
-            if GMAIL_USER and GMAIL_PASS:
+            if action_id == "approve":
+                print(f"[Approve] ========== Approval Action Started ==========")
+                sys.stdout.flush()
+                print(f"[Approve] draft_id: {draft_id}")
+                sys.stdout.flush()
                 try:
-                    send_via_gmail(
-                        GMAIL_USER, GMAIL_PASS, GMAIL_USER,
-                        f"[議事録承認] {d.title}",
-                        "承認済み議事録を添付します。",
-                        pdf_path
-                    )
-                except Exception as e:
-                    print(f"[Gmail] Send failed: {e}")
+                    # --- Slack更新（承認済み表示）---
+                    meta = DRAFT_META.get(draft_id, {})
+                    channel = meta.get("channel") or payload.get("channel", {}).get("id") or DEFAULT_SLACK_CHANNEL
+                    if not channel:
+                        print("[Approve] Error: Channel ID not found")
+                        sys.stdout.flush()
+                        return {"ok": False, "error": "チャンネルIDが取得できませんでした"}
+                    ts = meta.get("ts") or payload.get("message", {}).get("ts")
+                    print(f"[Approve] Channel: {channel}, TS: {ts}")
+                    sys.stdout.flush()
+                    approved_blocks = [{"type":"section","text":{"type":"mrkdwn","text":"*✅ 承認済み議事録*"}}] + build_minutes_preview_blocks(draft_id, d)[:-1]
+                    if ts:
+                        client_slack.chat_update(channel=channel, ts=ts, text="承認済み議事録", blocks=approved_blocks)
+                    client_slack.chat_postMessage(channel=channel, thread_ts=ts, text="PDF化・メール送信・Drive保存を実行中...")
+                    print("[Approve] Slack messages posted")
+                    sys.stdout.flush()
 
-            # --- ④ Drive保存（リンク取得） ---
-            drive_file = None
-            try:
-                # サービスアカウント認証情報が設定されているかチェック
-                has_service_account = bool(GOOGLE_SERVICE_ACCOUNT_JSON) or (GOOGLE_SERVICE_ACCOUNT_PATH and os.path.exists(GOOGLE_SERVICE_ACCOUNT_PATH))
-                
-                print(f"[Drive] ========== Drive Upload Process Started ==========")
-                sys.stdout.flush()
-                print(f"[Drive] Checking service account configuration...")
-                sys.stdout.flush()
-                print(f"[Drive] GOOGLE_SERVICE_ACCOUNT_JSON: {'set' if GOOGLE_SERVICE_ACCOUNT_JSON else 'not set'}")
-                sys.stdout.flush()
-                print(f"[Drive] GOOGLE_SERVICE_ACCOUNT_PATH: {GOOGLE_SERVICE_ACCOUNT_PATH}")
-                sys.stdout.flush()
-                print(f"[Drive] GOOGLE_DRIVE_FOLDER_ID: {GOOGLE_DRIVE_FOLDER_ID}")
-                sys.stdout.flush()
-                print(f"[Drive] has_service_account: {has_service_account}")
-                sys.stdout.flush()
-                print(f"[Drive] PDF path: {pdf_path}")
-                sys.stdout.flush()
-                print(f"[Drive] PDF exists: {pdf_path.exists()}")
-                sys.stdout.flush()
-                
-                if has_service_account:
-                    try:
-                        print("[Drive] Starting upload...")
-                        sys.stdout.flush()
-                        drive_file = upload_to_drive(pdf_path)
-                        print(f"[Drive] Upload successful: {drive_file}")
-                        sys.stdout.flush()
-                        if drive_file and "webViewLink" in drive_file:
-                            print(f"[Drive] PDF uploaded to: {drive_file.get('webViewLink')}")
+                    # --- ① 議事録PDF（既存）
+                    print("[Approve] Creating PDF...")
+                    sys.stdout.flush()
+                    pdf_path = PDF_DIR / f"{draft_id}.pdf"
+                    await create_pdf_async(d, pdf_path)
+                    print(f"[Approve] PDF created: {pdf_path}")
+                    sys.stdout.flush()
+
+                    # --- ② 設計チェックリストPDF（新規）
+                    print("[Approve] Creating checklist PDF...")
+                    sys.stdout.flush()
+                    checklist_path = PDF_DIR / f"{draft_id}_design_checklist.pdf"
+                    create_design_checklist_pdf(checklist_path, d)
+                    print(f"[Approve] Checklist PDF created: {checklist_path}")
+                    sys.stdout.flush()
+
+                    # --- ③ Gmail送信 ---
+                    if GMAIL_USER and GMAIL_PASS:
+                        try:
+                            print("[Approve] Sending Gmail...")
                             sys.stdout.flush()
+                            send_via_gmail(
+                                GMAIL_USER, GMAIL_PASS, GMAIL_USER,
+                                f"[議事録承認] {d.title}",
+                                "承認済み議事録を添付します。",
+                                pdf_path
+                            )
+                            print("[Approve] Gmail sent successfully")
+                            sys.stdout.flush()
+                        except Exception as e:
+                            print(f"[Gmail] Send failed: {e}")
+                            sys.stdout.flush()
+
+                    # --- ④ Drive保存（リンク取得） ---
+                    print("[Approve] Starting Drive upload process...")
+                    sys.stdout.flush()
+                    drive_file = None
+                    try:
+                        # サービスアカウント認証情報が設定されているかチェック
+                        has_service_account = bool(GOOGLE_SERVICE_ACCOUNT_JSON) or (GOOGLE_SERVICE_ACCOUNT_PATH and os.path.exists(GOOGLE_SERVICE_ACCOUNT_PATH))
+                        
+                        print(f"[Drive] ========== Drive Upload Process Started ==========")
+                        sys.stdout.flush()
+                        print(f"[Drive] Checking service account configuration...")
+                        sys.stdout.flush()
+                        print(f"[Drive] GOOGLE_SERVICE_ACCOUNT_JSON: {'set' if GOOGLE_SERVICE_ACCOUNT_JSON else 'not set'}")
+                        sys.stdout.flush()
+                        print(f"[Drive] GOOGLE_SERVICE_ACCOUNT_PATH: {GOOGLE_SERVICE_ACCOUNT_PATH}")
+                        sys.stdout.flush()
+                        print(f"[Drive] GOOGLE_DRIVE_FOLDER_ID: {GOOGLE_DRIVE_FOLDER_ID}")
+                        sys.stdout.flush()
+                        print(f"[Drive] has_service_account: {has_service_account}")
+                        sys.stdout.flush()
+                        print(f"[Drive] PDF path: {pdf_path}")
+                        sys.stdout.flush()
+                        print(f"[Drive] PDF exists: {pdf_path.exists()}")
+                        sys.stdout.flush()
+                        
+                        if has_service_account:
+                            try:
+                                print("[Drive] Starting upload...")
+                                sys.stdout.flush()
+                                drive_file = upload_to_drive(pdf_path)
+                                print(f"[Drive] Upload successful: {drive_file}")
+                                sys.stdout.flush()
+                                if drive_file and "webViewLink" in drive_file:
+                                    print(f"[Drive] PDF uploaded to: {drive_file.get('webViewLink')}")
+                                    sys.stdout.flush()
+                            except Exception as e:
+                                print(f"[Drive] Upload failed with exception: {e}")
+                                sys.stdout.flush()
+                                import traceback
+                                print(f"[Drive] Traceback: {traceback.format_exc()}")
+                                sys.stdout.flush()
+                                drive_file = None
+                        else:
+                            print("[Drive] Service account credentials not found, skipping Drive upload")
+                            sys.stdout.flush()
+                            print("[Drive] Please set GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_PATH in Azure App Service settings")
+                            sys.stdout.flush()
+                        print(f"[Drive] ========== Drive Upload Process Completed ==========")
+                        sys.stdout.flush()
                     except Exception as e:
-                        print(f"[Drive] Upload failed with exception: {e}")
+                        print(f"[Drive] Unexpected error in Drive upload section: {e}")
                         sys.stdout.flush()
                         import traceback
                         print(f"[Drive] Traceback: {traceback.format_exc()}")
                         sys.stdout.flush()
                         drive_file = None
-                else:
-                    print("[Drive] Service account credentials not found, skipping Drive upload")
+
+                    # --- ⑤ SlackへPDFを2点とも添付 ---
+                    try:
+                        print("[Approve] Uploading PDFs to Slack...")
+                        sys.stdout.flush()
+                        client_slack.files_upload_v2(
+                            channels=channel, thread_ts=ts,
+                            initial_comment="議事録PDFを添付します。",
+                            file=str(pdf_path), filename=pdf_path.name,
+                            title=f"議事録：{d.title}"
+                        )
+                        client_slack.files_upload_v2(
+                            channels=channel, thread_ts=ts,
+                            initial_comment="設計チェックリストPDFを添付します。",
+                            file=str(checklist_path), filename=checklist_path.name,
+                            title="設計チェックリスト"
+                        )
+                        print("[Approve] PDFs uploaded to Slack")
+                        sys.stdout.flush()
+                    except Exception as e:
+                        print(f"[Slack] file upload failed: {e}")
+                        sys.stdout.flush()
+
+                    # --- ⑥ タスクリストを同スレッドに表示 ---
+                    try:
+                        print("[Approve] Posting task list to Slack...")
+                        sys.stdout.flush()
+                        client_slack.chat_postMessage(
+                            channel=channel, thread_ts=ts,
+                            blocks=build_tasks_blocks(d, draft_id),
+                            text="アクションアイテム＆タスク"
+                        )
+                        print("[Approve] Task list posted to Slack")
+                        sys.stdout.flush()
+                    except Exception as e:
+                        print(f"[Slack] tasks post failed: {e}")
+                        sys.stdout.flush()
+
+                    # 完了メッセージ
+                    print("[Approve] Posting completion message...")
                     sys.stdout.flush()
-                    print("[Drive] Please set GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_PATH in Azure App Service settings")
+                    msg = "✅ PDF化・メール送信・Google Drive保存を完了しました。"
+                    if drive_file and drive_file.get("webViewLink"):
+                        msg += f"\n🔗 Drive: {drive_file['webViewLink']}"
+                    client_slack.chat_postMessage(channel=channel, thread_ts=ts, text=msg)
+                    print("[Approve] Completion message posted")
                     sys.stdout.flush()
-                print(f"[Drive] ========== Drive Upload Process Completed ==========")
-                sys.stdout.flush()
-            except Exception as e:
-                print(f"[Drive] Unexpected error in Drive upload section: {e}")
-                sys.stdout.flush()
-                import traceback
-                print(f"[Drive] Traceback: {traceback.format_exc()}")
-                sys.stdout.flush()
-                drive_file = None
-
-            # --- ⑤ SlackへPDFを2点とも添付 ---
-            try:
-                client_slack.files_upload_v2(
-                    channels=channel, thread_ts=ts,
-                    initial_comment="議事録PDFを添付します。",
-                    file=str(pdf_path), filename=pdf_path.name,
-                    title=f"議事録：{d.title}"
-                )
-                client_slack.files_upload_v2(
-                    channels=channel, thread_ts=ts,
-                    initial_comment="設計チェックリストPDFを添付します。",
-                    file=str(checklist_path), filename=checklist_path.name,
-                    title="設計チェックリスト"
-                )
-            except Exception as e:
-                print(f"[Slack] file upload failed: {e}")
-
-            # --- ⑥ タスクリストを同スレッドに表示 ---
-            try:
-                client_slack.chat_postMessage(
-                    channel=channel, thread_ts=ts,
-                    blocks=build_tasks_blocks(d, draft_id),
-                    text="アクションアイテム＆タスク"
-                )
-            except Exception as e:
-                print(f"[Slack] tasks post failed: {e}")
-
-            # 完了メッセージ
-            msg = "✅ PDF化・メール送信・Google Drive保存を完了しました。"
-            if drive_file and drive_file.get("webViewLink"):
-                msg += f"\n🔗 Drive: {drive_file['webViewLink']}"
-            client_slack.chat_postMessage(channel=channel, thread_ts=ts, text=msg)
-            return {"ok": True}
+                    print(f"[Approve] ========== Approval Action Completed ==========")
+                    sys.stdout.flush()
+                    return {"ok": True}
+                except Exception as e:
+                    print(f"[Approve] Unexpected error in approval process: {e}")
+                    sys.stdout.flush()
+                    import traceback
+                    print(f"[Approve] Traceback: {traceback.format_exc()}")
+                    sys.stdout.flush()
+                    return {"ok": False, "error": str(e)}
 
     # --- モーダル保存 ---
     if ptype == "view_submission" and payload["view"]["callback_id"] == "edit_submit":
@@ -1044,4 +1105,13 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
             client_slack.chat_update(channel=channel, ts=ts, text="下書きを更新しました", blocks=build_minutes_preview_blocks(draft_id, updated))
         return JSONResponse({"response_action": "clear"})
 
+    print(f"[SlackActions] Unknown request type: {ptype}")
+    sys.stdout.flush()
     return {"ok": True}
+    except Exception as e:
+        print(f"[SlackActions] Unexpected error in slack_actions endpoint: {e}")
+        sys.stdout.flush()
+        import traceback
+        print(f"[SlackActions] Traceback: {traceback.format_exc()}")
+        sys.stdout.flush()
+        return {"ok": False, "error": str(e)}
