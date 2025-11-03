@@ -1082,32 +1082,32 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
                     sys.stdout.flush()
                     return {"ok": False, "error": str(e)}
 
-    # --- モーダル保存 ---
-    if ptype == "view_submission" and payload["view"]["callback_id"] == "edit_submit":
-        draft_id = payload["view"]["private_metadata"]
-        state = payload["view"]["state"]["values"]
-        updated = Draft(
-            title="",
-            summary=state.get("summary", {}).get("inp", {}).get("value", ""),
-            decisions=state.get("decisions", {}).get("inp", {}).get("value", ""),
-            actions=state.get("actions", {}).get("inp", {}).get("value", ""),
-            issues=state.get("issues", {}).get("inp", {}).get("value", ""),
-            meeting_name=state.get("meeting_name", {}).get("inp", {}).get("value", ""),
-            datetime_str=state.get("datetime_str", {}).get("inp", {}).get("value", ""),
-            participants=state.get("participants", {}).get("inp", {}).get("value", ""),
-            purpose=state.get("purpose", {}).get("inp", {}).get("value", ""),
-            risks=state.get("risks", {}).get("inp", {}).get("value", ""),
-        )
-        save_json(SUMM_DIR / f"{draft_id}.json", updated.dict())
-        meta = DRAFT_META.get(draft_id, {})
-        channel, ts = meta.get("channel"), meta.get("ts")
-        if channel and ts:
-            client_slack.chat_update(channel=channel, ts=ts, text="下書きを更新しました", blocks=build_minutes_preview_blocks(draft_id, updated))
-        return JSONResponse({"response_action": "clear"})
+        # --- モーダル保存 ---
+        if ptype == "view_submission" and payload["view"]["callback_id"] == "edit_submit":
+            draft_id = payload["view"]["private_metadata"]
+            state = payload["view"]["state"]["values"]
+            updated = Draft(
+                title="",
+                summary=state.get("summary", {}).get("inp", {}).get("value", ""),
+                decisions=state.get("decisions", {}).get("inp", {}).get("value", ""),
+                actions=state.get("actions", {}).get("inp", {}).get("value", ""),
+                issues=state.get("issues", {}).get("inp", {}).get("value", ""),
+                meeting_name=state.get("meeting_name", {}).get("inp", {}).get("value", ""),
+                datetime_str=state.get("datetime_str", {}).get("inp", {}).get("value", ""),
+                participants=state.get("participants", {}).get("inp", {}).get("value", ""),
+                purpose=state.get("purpose", {}).get("inp", {}).get("value", ""),
+                risks=state.get("risks", {}).get("inp", {}).get("value", ""),
+            )
+            save_json(SUMM_DIR / f"{draft_id}.json", updated.dict())
+            meta = DRAFT_META.get(draft_id, {})
+            channel, ts = meta.get("channel"), meta.get("ts")
+            if channel and ts:
+                client_slack.chat_update(channel=channel, ts=ts, text="下書きを更新しました", blocks=build_minutes_preview_blocks(draft_id, updated))
+            return JSONResponse({"response_action": "clear"})
 
-    print(f"[SlackActions] Unknown request type: {ptype}")
-    sys.stdout.flush()
-    return {"ok": True}
+        print(f"[SlackActions] Unknown request type: {ptype}")
+        sys.stdout.flush()
+        return {"ok": True}
     except Exception as e:
         print(f"[SlackActions] Unexpected error in slack_actions endpoint: {e}")
         sys.stdout.flush()
