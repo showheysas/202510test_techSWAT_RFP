@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import uuid
 import shutil
@@ -574,10 +575,12 @@ def get_drive_service(scope: str = "drive.file"):
     
     try:
         print("[Drive] Initializing service account credentials...")
+        sys.stdout.flush()
         
         # 方法1: 環境変数からJSONを読み込む（推奨）
         if GOOGLE_SERVICE_ACCOUNT_JSON:
             print("[Drive] Using credentials from GOOGLE_SERVICE_ACCOUNT_JSON environment variable")
+            sys.stdout.flush()
             try:
                 service_account_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
                 creds = service_account.Credentials.from_service_account_info(
@@ -585,12 +588,15 @@ def get_drive_service(scope: str = "drive.file"):
                     scopes=SCOPES
                 )
                 print("[Drive] Service account credentials loaded from JSON string")
+                sys.stdout.flush()
             except json.JSONDecodeError as e:
                 print(f"[Drive] Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
+                sys.stdout.flush()
                 raise ValueError(f"Invalid JSON in GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
         # 方法2: ファイルパスから読み込む
         elif GOOGLE_SERVICE_ACCOUNT_PATH:
             print(f"[Drive] Using credentials from file: {GOOGLE_SERVICE_ACCOUNT_PATH}")
+            sys.stdout.flush()
             if not os.path.exists(GOOGLE_SERVICE_ACCOUNT_PATH):
                 raise FileNotFoundError(f"Service account file not found: {GOOGLE_SERVICE_ACCOUNT_PATH}")
             creds = service_account.Credentials.from_service_account_file(
@@ -598,15 +604,19 @@ def get_drive_service(scope: str = "drive.file"):
                 scopes=SCOPES
             )
             print("[Drive] Service account credentials loaded from file")
+            sys.stdout.flush()
         else:
             raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_PATH must be set")
         
         print("[Drive] Building Drive service...")
+        sys.stdout.flush()
         service = build("drive", "v3", credentials=creds)
         print("[Drive] Drive service initialized successfully")
+        sys.stdout.flush()
         return service
     except Exception as e:
         print(f"[Drive] Failed to initialize Drive service: {e}")
+        sys.stdout.flush()
         raise
 
 # --- Google Drive保存（リンク返却 & 共有ドライブ対応） ---
@@ -617,10 +627,14 @@ def upload_to_drive(file_path: Path):
         if GOOGLE_DRIVE_FOLDER_ID:
             meta["parents"] = [GOOGLE_DRIVE_FOLDER_ID]
             print(f"[Drive] Uploading to folder: {GOOGLE_DRIVE_FOLDER_ID}")
+            sys.stdout.flush()
         else:
             print("[Drive] Uploading to root folder")
+            sys.stdout.flush()
         
         media = MediaFileUpload(str(file_path), mimetype="application/pdf")
+        print(f"[Drive] Creating file in Drive...")
+        sys.stdout.flush()
         f = service.files().create(
             body=meta,
             media_body=media,
@@ -628,9 +642,11 @@ def upload_to_drive(file_path: Path):
             supportsAllDrives=True
         ).execute()
         print(f"[Drive] Upload successful: {f}")
+        sys.stdout.flush()
         return f  # {"id": "...", "webViewLink": "..."}
     except HttpError as e:
         print(f"[Drive] Upload failed: {e}")
+        sys.stdout.flush()
         raise
 
 # --- Google Driveからのファイル取得機能 ---
@@ -918,30 +934,58 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
 
             # --- ④ Drive保存（リンク取得） ---
             drive_file = None
-            # サービスアカウント認証情報が設定されているかチェック
-            has_service_account = bool(GOOGLE_SERVICE_ACCOUNT_JSON) or (GOOGLE_SERVICE_ACCOUNT_PATH and os.path.exists(GOOGLE_SERVICE_ACCOUNT_PATH))
-            
-            print(f"[Drive] Checking service account configuration...")
-            print(f"[Drive] GOOGLE_SERVICE_ACCOUNT_JSON: {'set' if GOOGLE_SERVICE_ACCOUNT_JSON else 'not set'}")
-            print(f"[Drive] GOOGLE_SERVICE_ACCOUNT_PATH: {GOOGLE_SERVICE_ACCOUNT_PATH}")
-            print(f"[Drive] GOOGLE_DRIVE_FOLDER_ID: {GOOGLE_DRIVE_FOLDER_ID}")
-            print(f"[Drive] has_service_account: {has_service_account}")
-            
-            if has_service_account:
-                try:
-                    print("[Drive] Starting upload...")
-                    drive_file = upload_to_drive(pdf_path)
-                    print(f"[Drive] Upload successful: {drive_file}")
-                    if drive_file and "webViewLink" in drive_file:
-                        print(f"[Drive] PDF uploaded to: {drive_file.get('webViewLink')}")
-                except Exception as e:
-                    print(f"[Drive] Upload failed with exception: {e}")
-                    import traceback
-                    print(f"[Drive] Traceback: {traceback.format_exc()}")
-                    drive_file = None
-            else:
-                print("[Drive] Service account credentials not found, skipping Drive upload")
-                print("[Drive] Please set GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_PATH in Azure App Service settings")
+            try:
+                # サービスアカウント認証情報が設定されているかチェック
+                has_service_account = bool(GOOGLE_SERVICE_ACCOUNT_JSON) or (GOOGLE_SERVICE_ACCOUNT_PATH and os.path.exists(GOOGLE_SERVICE_ACCOUNT_PATH))
+                
+                print(f"[Drive] ========== Drive Upload Process Started ==========")
+                sys.stdout.flush()
+                print(f"[Drive] Checking service account configuration...")
+                sys.stdout.flush()
+                print(f"[Drive] GOOGLE_SERVICE_ACCOUNT_JSON: {'set' if GOOGLE_SERVICE_ACCOUNT_JSON else 'not set'}")
+                sys.stdout.flush()
+                print(f"[Drive] GOOGLE_SERVICE_ACCOUNT_PATH: {GOOGLE_SERVICE_ACCOUNT_PATH}")
+                sys.stdout.flush()
+                print(f"[Drive] GOOGLE_DRIVE_FOLDER_ID: {GOOGLE_DRIVE_FOLDER_ID}")
+                sys.stdout.flush()
+                print(f"[Drive] has_service_account: {has_service_account}")
+                sys.stdout.flush()
+                print(f"[Drive] PDF path: {pdf_path}")
+                sys.stdout.flush()
+                print(f"[Drive] PDF exists: {pdf_path.exists()}")
+                sys.stdout.flush()
+                
+                if has_service_account:
+                    try:
+                        print("[Drive] Starting upload...")
+                        sys.stdout.flush()
+                        drive_file = upload_to_drive(pdf_path)
+                        print(f"[Drive] Upload successful: {drive_file}")
+                        sys.stdout.flush()
+                        if drive_file and "webViewLink" in drive_file:
+                            print(f"[Drive] PDF uploaded to: {drive_file.get('webViewLink')}")
+                            sys.stdout.flush()
+                    except Exception as e:
+                        print(f"[Drive] Upload failed with exception: {e}")
+                        sys.stdout.flush()
+                        import traceback
+                        print(f"[Drive] Traceback: {traceback.format_exc()}")
+                        sys.stdout.flush()
+                        drive_file = None
+                else:
+                    print("[Drive] Service account credentials not found, skipping Drive upload")
+                    sys.stdout.flush()
+                    print("[Drive] Please set GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_PATH in Azure App Service settings")
+                    sys.stdout.flush()
+                print(f"[Drive] ========== Drive Upload Process Completed ==========")
+                sys.stdout.flush()
+            except Exception as e:
+                print(f"[Drive] Unexpected error in Drive upload section: {e}")
+                sys.stdout.flush()
+                import traceback
+                print(f"[Drive] Traceback: {traceback.format_exc()}")
+                sys.stdout.flush()
+                drive_file = None
 
             # --- ⑤ SlackへPDFを2点とも添付 ---
             try:
