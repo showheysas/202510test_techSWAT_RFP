@@ -223,10 +223,15 @@ def build_minutes_preview_blocks(draft_id: str, d: Draft):
     def md_section(label, text):
         return {"type":"section","text":{"type":"mrkdwn","text":f"*{label}*\n{text or '-'}"}}
 
+    # 議事録名を最大10文字に制限
+    meeting_name_display = d.meeting_name or d.title or '（無題）'
+    if len(meeting_name_display) > 10:
+        meeting_name_display = meeting_name_display[:10] + "..."
+    
     head = [
         {"type":"header","text":{"type":"plain_text","text":"議事録ボット"}},
         {"type":"section","fields":[
-            {"type":"mrkdwn","text":f"*会議名:*\n{d.meeting_name or d.title or '（無題）'}"},
+            {"type":"mrkdwn","text":f"*会議名:*\n{meeting_name_display}"},
             {"type":"mrkdwn","text":f"*日時:*\n{d.datetime_str or '-'}"},
             {"type":"mrkdwn","text":f"*参加者:*\n{d.participants or '-'}"},
             {"type":"mrkdwn","text":f"*目的:*\n{d.purpose or '-'}"},
@@ -431,6 +436,11 @@ def schedule_task_reminders(channel: str, thread_ts: str, d: Draft):
                 print(f"[Slack] scheduleMessage failed: {e}")
 
 def post_slack_draft(channel_id: str, draft_id: str, title: str, d: Draft):
+    # 重複投稿を防ぐ：既に投稿済みの場合はスキップ
+    if draft_id in DRAFT_META and DRAFT_META[draft_id].get("ts"):
+        print(f"[Slack] Draft {draft_id} already posted, skipping duplicate")
+        return DRAFT_META[draft_id]
+    
     blocks = build_minutes_preview_blocks(draft_id, d)   # ← ここを差し替え
     try:
         resp = client_slack.chat_postMessage(channel=channel_id, text="議事録 下書き", blocks=blocks)
@@ -1574,6 +1584,56 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
             client_slack.views_open(trigger_id=payload["trigger_id"], view=build_edit_modal(draft_id, d))
             return JSONResponse({"response_action": "clear"})
 
+        if action_id == "task_complete":
+            # タスク完了処理
+            value = action.get("value", "")
+            if ":" in value:
+                task_draft_id, task_index = value.split(":", 1)
+                try:
+                    task_index = int(task_index)
+                    # draft_idからDraftデータを取得
+                    task_draft_data = json.loads((SUMM_DIR / f"{task_draft_id}.json").read_text(encoding="utf-8"))
+                    task_d = Draft(**task_draft_data)
+                    # タスクリストを更新（完了マーク）
+                    tasks = parse_tasks_from_actions(task_d.actions)
+                    if 0 <= task_index < len(tasks):
+                        task = tasks[task_index]
+                        # メッセージを更新して完了状態を表示
+                        channel = payload.get("channel", {}).get("id") or DEFAULT_SLACK_CHANNEL
+                        message_ts = payload.get("message", {}).get("ts")
+                        if channel and message_ts:
+                            # タスクリストブロックを更新
+                            updated_blocks = build_tasks_blocks(task_d, task_draft_id)
+                            # 該当タスクを完了状態に変更
+                            for block in updated_blocks:
+                                if block.get("type") == "section":
+                                    text = block.get("text", {}).get("text", "")
+                                    if f"☐ {task['title']}" in text or task['title'] in text:
+                                        # チェックボックスを完了に変更
+                                        block["text"]["text"] = text.replace("☐", "☑")
+                                        # 完了ボタンを無効化
+                                        if "accessory" in block:
+                                            block["accessory"] = {
+                                                "type": "button",
+                                                "text": {"type": "plain_text", "text": "完了済み"},
+                                                "style": "primary",
+                                                "value": value,
+                                                "action_id": "task_complete",
+                                                "disabled": True
+                                            }
+                            try:
+                                client_slack.chat_update(
+                                    channel=channel,
+                                    ts=message_ts,
+                                    blocks=updated_blocks,
+                                    text="アクションアイテム＆タスク"
+                                )
+                            except Exception as e:
+                                print(f"[Slack] Failed to update task block: {e}")
+                except (ValueError, IndexError, FileNotFoundError):
+                    pass
+            return JSONResponse({"response_action": "clear"})
+
         if action_id == "approve":
             # --- Slack更新（承認済み表示）---
             meta = DRAFT_META.get(draft_id, {})
@@ -1581,16 +1641,49 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
             if not channel:
                 return {"ok": False, "error": "チャンネルIDが取得できませんでした"}
             ts = meta.get("ts") or payload.get("message", {}).get("ts")
-            approved_blocks = [{"type":"section","text":{"type":"mrkdwn","text":"*✅ 承認済み議事録*"}}] + build_minutes_preview_blocks(draft_id, d)[:-1]
+            
+            # 日付と会議名を取得
+            date_str = d.datetime_str or ""
+            meeting_name = (d.meeting_name or d.title or "議事録")[:10]
+            
+            # シンプルな承認済みメッセージ（本文のみ）
+            approved_text = f"✅ 承認済み議事録：{date_str} {meeting_name}"
             if ts:
-                client_slack.chat_update(channel=channel, ts=ts, text="承認済み議事録", blocks=approved_blocks)
+                client_slack.chat_update(channel=channel, ts=ts, text=approved_text, blocks=[])
 
-            # --- ① 議事録PDF（既存）
-            pdf_path = PDF_DIR / f"{draft_id}.pdf"
+            # PDF命名用ヘルパー：日付と会議名を取得
+            # datetime_strから日付を抽出（例："2025年11月3日 | 14:00" → "2025-11-03"）
+            pdf_date_str = ""
+            if d.datetime_str:
+                # 日付形式を抽出
+                date_patterns = [
+                    r"(\d{4})年(\d{1,2})月(\d{1,2})日",
+                    r"(\d{4})-(\d{1,2})-(\d{1,2})",
+                    r"(\d{4})/(\d{1,2})/(\d{1,2})",
+                ]
+                for pattern in date_patterns:
+                    match = re.search(pattern, d.datetime_str)
+                    if match:
+                        year, month, day = match.groups()
+                        pdf_date_str = f"{year}-{int(month):02d}-{int(day):02d}"
+                        break
+            # 日付が取得できない場合は現在日付を使用
+            if not pdf_date_str:
+                pdf_date_str = datetime.now().strftime("%Y-%m-%d")
+            
+            # 会議名を取得（10文字制限）
+            meeting_name_for_file = (d.meeting_name or d.title or "議事録")[:10]
+            # ファイル名に使えない文字を置換
+            meeting_name_for_file = re.sub(r'[<>:"/\\|?*]', '_', meeting_name_for_file)
+            
+            # --- ① 議事録PDF（命名規則：yyyy-mm-dd_議事録_会議名.pdf）
+            pdf_filename = f"{pdf_date_str}_議事録_{meeting_name_for_file}.pdf"
+            pdf_path = PDF_DIR / pdf_filename
             await create_pdf_async(d, pdf_path)
 
-            # --- ② 設計チェックリストPDF（新規）
-            checklist_path = PDF_DIR / f"{draft_id}_design_checklist.pdf"
+            # --- ② 設計チェックリストPDF（命名規則：yyyy-mm-dd_設計チェックリスト_会議名.pdf）
+            checklist_filename = f"{pdf_date_str}_設計チェックリスト_{meeting_name_for_file}.pdf"
+            checklist_path = PDF_DIR / checklist_filename
             create_design_checklist_pdf(checklist_path, d)
 
             # --- ③ Gmail送信（独立した処理、エラーが発生しても続行）
