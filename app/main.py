@@ -52,8 +52,12 @@ GOOGLE_SERVICE_ACCOUNT_PATH = os.getenv("GOOGLE_SERVICE_ACCOUNT_PATH", "")
 # Notta Google Drive連携
 NOTTA_DRIVE_FOLDER_ID = os.getenv("NOTTA_DRIVE_FOLDER_ID", "")
 GOOGLE_DRIVE_WATCH_ENABLED = os.getenv("GOOGLE_DRIVE_WATCH_ENABLED", "false").lower() == "true"
+# Google Drive Webhook検証用シークレット
+GOOGLE_DRIVE_WEBHOOK_SECRET = os.getenv("GOOGLE_DRIVE_WEBHOOK_SECRET", "")
 
 DRAFT_META = {}
+# Drive Push通知チャンネル情報の保存（メモリ）
+DRIVE_WATCH_CHANNEL_INFO = {}
 
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY が未設定です。")
@@ -820,6 +824,175 @@ def mark_file_as_processed(file_id: str, original_name: str) -> bool:
         print(f"[Drive] Failed to rename file: {e}")
         return False
 
+# --- Google Drive Push Notifications（Webhook）機能 ---
+def watch_drive_folder(folder_id: str) -> dict:
+    """
+    Google Driveフォルダの変更を監視するチャンネルを開始
+    戻り値: {"id": channel_id, "resourceId": resource_id, "expiration": expiration}
+    """
+    if not folder_id:
+        raise ValueError("Folder ID is required")
+    
+    service = get_drive_service("drive")
+    
+    # WebhookエンドポイントURL
+    webhook_url = os.getenv("WEBHOOK_URL", "")
+    if not webhook_url:
+        # Azure App ServiceのURLを自動検出（環境変数から）
+        app_name = os.getenv("WEBSITE_SITE_NAME", "")
+        if app_name:
+            webhook_url = f"https://{app_name}.azurewebsites.net/webhook/drive"
+        else:
+            raise ValueError("WEBHOOK_URL or WEBSITE_SITE_NAME must be set")
+    
+    # チャンネルの有効期限（最大7日、ここでは6日に設定）
+    expiration = int((time.time() + 6 * 24 * 60 * 60) * 1000)  # ミリ秒
+    
+    channel_id = str(uuid.uuid4())
+    
+    try:
+        request_body = {
+            "id": channel_id,
+            "type": "web_hook",
+            "address": webhook_url,
+            "token": GOOGLE_DRIVE_WEBHOOK_SECRET or channel_id  # トークンとしてシークレットを使用
+        }
+        
+        channel = service.files().watch(
+            fileId=folder_id,
+            body=request_body,
+            supportsAllDrives=True
+        ).execute()
+        
+        channel_info = {
+            "id": channel.get("id"),
+            "resourceId": channel.get("resourceId"),
+            "expiration": channel.get("expiration"),
+            "address": webhook_url,
+            "folder_id": folder_id
+        }
+        
+        DRIVE_WATCH_CHANNEL_INFO[folder_id] = channel_info
+        
+        print(f"[Drive] Watch channel started for folder: {folder_id}")
+        print(f"[Drive] Channel ID: {channel_info['id']}")
+        print(f"[Drive] Resource ID: {channel_info['resourceId']}")
+        print(f"[Drive] Expiration: {channel_info['expiration']}")
+        print(f"[Drive] Webhook URL: {webhook_url}")
+        
+        return channel_info
+    except HttpError as e:
+        print(f"[Drive] Failed to start watch channel: {e}")
+        raise
+
+def stop_watch_drive_folder(channel_id: str, resource_id: str) -> bool:
+    """
+    Google Driveフォルダの監視チャンネルを停止
+    """
+    service = get_drive_service("drive")
+    
+    try:
+        service.channels().stop(
+            body={
+                "id": channel_id,
+                "resourceId": resource_id
+            }
+        ).execute()
+        
+        print(f"[Drive] Watch channel stopped: {channel_id}")
+        return True
+    except HttpError as e:
+        print(f"[Drive] Failed to stop watch channel: {e}")
+        return False
+
+def process_drive_file_notification(file_id: str, channel_id: str = None):
+    """
+    Google Driveからの通知でファイルを処理（バックグラウンドタスク）
+    """
+    try:
+        # ファイルメタデータを取得
+        file_meta = get_file_metadata(file_id)
+        file_name = file_meta.get("name", "")
+        
+        # 既に処理済みか確認
+        if is_file_processed(file_name):
+            print(f"[Drive] File already processed: {file_name}")
+            return
+        
+        # テキストファイルか確認
+        mime_type = file_meta.get("mimeType", "")
+        if mime_type not in ["text/plain", "text/plain; charset=utf-8"]:
+            print(f"[Drive] Not a text file: {mime_type}")
+            return
+        
+        # テキストファイルをダウンロード
+        text_content = download_text_from_drive(file_id)
+        
+        # ファイル名からタイトルを生成
+        title = file_name.replace(".txt", "").replace("_processed_", "")
+        
+        # 作成日時を取得
+        created_time = file_meta.get("createdTime", "")
+        datetime_str = created_time if created_time else datetime.now().isoformat()
+        
+        # テキスト処理パイプラインを実行
+        draft_id = str(uuid.uuid4())
+        process_text_pipeline(draft_id, text_content, title, DEFAULT_SLACK_CHANNEL, datetime_str)
+        
+        # ファイルを処理済みにマーク
+        mark_file_as_processed(file_id, file_name)
+        
+        print(f"[Drive] File processed successfully: {file_name}")
+    except Exception as e:
+        print(f"[Drive] Error processing file notification: {e}")
+        import traceback
+        print(f"[Drive] Traceback: {traceback.format_exc()}")
+
+# =========================
+# アプリ起動/停止時の処理
+# =========================
+@app.on_event("startup")
+async def startup_event():
+    """
+    アプリ起動時にGoogle Drive監視を開始
+    """
+    if GOOGLE_DRIVE_WATCH_ENABLED and NOTTA_DRIVE_FOLDER_ID:
+        try:
+            print(f"[Drive] Starting watch for folder: {NOTTA_DRIVE_FOLDER_ID}")
+            channel_info = watch_drive_folder(NOTTA_DRIVE_FOLDER_ID)
+            print(f"[Drive] Watch started successfully")
+            sys.stdout.flush()
+        except Exception as e:
+            print(f"[Drive] Failed to start watch: {e}")
+            import traceback
+            print(f"[Drive] Traceback: {traceback.format_exc()}")
+            sys.stdout.flush()
+    else:
+        print(f"[Drive] Watch disabled or folder ID not set")
+        print(f"[Drive] GOOGLE_DRIVE_WATCH_ENABLED: {GOOGLE_DRIVE_WATCH_ENABLED}")
+        print(f"[Drive] NOTTA_DRIVE_FOLDER_ID: {NOTTA_DRIVE_FOLDER_ID}")
+        sys.stdout.flush()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """
+    アプリ停止時にGoogle Drive監視を停止
+    """
+    if DRIVE_WATCH_CHANNEL_INFO:
+        try:
+            for folder_id, channel_info in DRIVE_WATCH_CHANNEL_INFO.items():
+                channel_id = channel_info.get("id")
+                resource_id = channel_info.get("resourceId")
+                if channel_id and resource_id:
+                    print(f"[Drive] Stopping watch for folder: {folder_id}")
+                    stop_watch_drive_folder(channel_id, resource_id)
+                    sys.stdout.flush()
+        except Exception as e:
+            print(f"[Drive] Error stopping watch: {e}")
+            import traceback
+            print(f"[Drive] Traceback: {traceback.format_exc()}")
+            sys.stdout.flush()
+
 # =========================
 # FastAPIエンドポイント
 # =========================
@@ -877,6 +1050,115 @@ async def process_drive_file(
     
     background.add_task(process_drive_file_task, draft_id, file_id, effective_channel)
     return {"accepted": True, "draft_id": draft_id, "file_id": file_id}
+
+@app.post("/webhook/drive")
+async def webhook_drive(request: Request, background: BackgroundTasks):
+    """
+    Google Drive Push通知のWebhookエンドポイント
+    """
+    try:
+        # リクエストボディを取得
+        body = await request.body()
+        
+        # JSONとして解析
+        try:
+            notification = json.loads(body.decode("utf-8"))
+        except json.JSONDecodeError:
+            print("[Drive Webhook] Invalid JSON in request body")
+            return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+        
+        # 通知タイプを確認
+        notification_type = notification.get("type", "")
+        
+        # 同期通知（初期チャレンジ）
+        if notification_type == "sync":
+            print("[Drive Webhook] Received sync notification (initial challenge)")
+            # チャレンジ値を返す
+            challenge = notification.get("challenge", "")
+            if challenge:
+                print(f"[Drive Webhook] Returning challenge: {challenge}")
+                return JSONResponse(content={"challenge": challenge})
+            else:
+                print("[Drive Webhook] No challenge in sync notification")
+                return JSONResponse(status_code=400, content={"error": "No challenge"})
+        
+        # 変更通知
+        elif notification_type == "change":
+            print("[Drive Webhook] Received change notification")
+            
+            # Webhook検証（オプション）
+            if GOOGLE_DRIVE_WEBHOOK_SECRET:
+                token = notification.get("token", "")
+                if token != GOOGLE_DRIVE_WEBHOOK_SECRET:
+                    print("[Drive Webhook] Invalid token")
+                    return JSONResponse(status_code=403, content={"error": "Invalid token"})
+            
+            # 変更されたリソースのIDを取得
+            resource_id = notification.get("resourceId", "")
+            if not resource_id:
+                print("[Drive Webhook] No resourceId in notification")
+                return JSONResponse(status_code=400, content={"error": "No resourceId"})
+            
+            # 変更を検出したら、フォルダ内のファイルをチェック
+            if NOTTA_DRIVE_FOLDER_ID:
+                # フォルダ内の新しいファイルを検出して処理
+                background.add_task(check_and_process_new_files, NOTTA_DRIVE_FOLDER_ID)
+            
+            return JSONResponse(status_code=200, content={"ok": True})
+        
+        # 不明な通知タイプ
+        else:
+            print(f"[Drive Webhook] Unknown notification type: {notification_type}")
+            return JSONResponse(status_code=400, content={"error": "Unknown notification type"})
+    
+    except Exception as e:
+        print(f"[Drive Webhook] Error processing notification: {e}")
+        import traceback
+        print(f"[Drive Webhook] Traceback: {traceback.format_exc()}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+def check_and_process_new_files(folder_id: str):
+    """
+    フォルダ内の新しいファイルをチェックして処理（バックグラウンドタスク）
+    """
+    try:
+        service = get_drive_service("drive.readonly")
+        
+        # フォルダ内のファイルを一覧取得
+        query = f"'{folder_id}' in parents and trashed=false and mimeType='text/plain'"
+        results = service.files().list(
+            q=query,
+            fields="files(id, name, createdTime, modifiedTime, mimeType)",
+            orderBy="createdTime desc",
+            pageSize=10,  # 最新10件をチェック
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
+        ).execute()
+        
+        files = results.get("files", [])
+        print(f"[Drive] Found {len(files)} text files in folder")
+        
+        # 各ファイルをチェックして処理
+        for file in files:
+            file_id = file.get("id")
+            file_name = file.get("name", "")
+            
+            # 既に処理済みか確認
+            if is_file_processed(file_name):
+                continue
+            
+            # 処理を開始
+            print(f"[Drive] Processing new file: {file_name} ({file_id})")
+            try:
+                process_drive_file_notification(file_id)
+            except Exception as e:
+                print(f"[Drive] Error processing file {file_id}: {e}")
+                continue
+        
+    except Exception as e:
+        print(f"[Drive] Error checking new files: {e}")
+        import traceback
+        print(f"[Drive] Traceback: {traceback.format_exc()}")
 
 def process_drive_file_task(draft_id: str, file_id: str, channel_id: str):
     """
