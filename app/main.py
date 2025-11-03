@@ -1628,6 +1628,8 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
                     file=str(pdf_path), filename=pdf_path.name,
                     title=f"議事録：{d.title}"
                 )
+                # アップロード完了を待つ（Slack側の処理順序を保証）
+                time.sleep(0.5)
             except Exception as e:
                 print(f"[Slack] file upload failed: {e}")
 
@@ -1639,6 +1641,8 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
                     file=str(checklist_path), filename=checklist_path.name,
                     title="設計チェックリスト"
                 )
+                # アップロード完了を待つ（Slack側の処理順序を保証）
+                time.sleep(0.5)
             except Exception as e:
                 print(f"[Slack] file upload failed: {e}")
 
