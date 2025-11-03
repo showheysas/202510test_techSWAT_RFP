@@ -10,11 +10,7 @@ import re
 import asyncio
 from pathlib import Path
 from typing import Optional
-from datetime import datetime, timedelta
-try:
-    from zoneinfo import ZoneInfo  # Python 3.9+
-except Exception:
-    ZoneInfo = None
+from datetime import datetime
 
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Request, Header
 from fastapi.responses import JSONResponse
@@ -61,10 +57,6 @@ GOOGLE_DRIVE_WATCH_ENABLED = os.getenv("GOOGLE_DRIVE_WATCH_ENABLED", "false").lo
 GOOGLE_DRIVE_WEBHOOK_SECRET = os.getenv("GOOGLE_DRIVE_WEBHOOK_SECRET", "")
 # Google Drive ポーリング間隔（秒、デフォルト1分）
 GOOGLE_DRIVE_POLL_INTERVAL = int(os.getenv("GOOGLE_DRIVE_POLL_INTERVAL", "60"))
-
-# Slack リマインド設定
-SLACK_USER_MAP_JSON = os.getenv("SLACK_USER_MAP_JSON", "")  # 例: {"田中":"U0123...", "佐藤":"U0456..."}
-DEFAULT_REMIND_HOUR = int(os.getenv("DEFAULT_REMIND_HOUR", "10"))  # 期限日に何時にリマインドするか(ローカル時間)
 
 DRAFT_META = {}
 # Drive Push通知チャンネル情報の保存（メモリ）
@@ -316,119 +308,6 @@ def build_tasks_blocks(d: Draft, draft_id: str = ""):
             })
     
     return blocks
-
-# リマインド機能用ヘルパー関数
-def _tz():
-    """JST固定（必要なら環境変数で切替）"""
-    if ZoneInfo:
-        return ZoneInfo("Asia/Tokyo")
-    # フォールバック：naive扱い
-    return None
-
-def _parse_due_to_dt(due_str: Optional[str]) -> Optional[datetime]:
-    """
-    '10/25' '2025/10/25' '2025-10-25 15:00' などをJST日付に解釈。
-    時刻未指定なら DEFAULT_REMIND_HOUR:00 を設定。
-    """
-    if not due_str:
-        return None
-    s = due_str.strip()
-    # よくある表記を順にトライ
-    fmt_candidates = [
-        "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M",
-        "%Y-%m-%d", "%Y/%m/%d",
-        "%m/%d",  # 年なし（今年扱い）
-    ]
-    now = datetime.now(_tz())
-    for fmt in fmt_candidates:
-        try:
-            dt = datetime.strptime(s, fmt)
-            # 年なし → 今年
-            if fmt == "%m/%d":
-                dt = dt.replace(year=now.year)
-            # 時刻なければデフォ時刻
-            if fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d"):
-                dt = dt.replace(hour=DEFAULT_REMIND_HOUR, minute=0)
-            # タイムゾーン付与
-            if _tz():
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=_tz())
-            return dt
-        except ValueError:
-            continue
-    return None
-
-def _epoch(dt: datetime) -> Optional[int]:
-    """datetimeをUTC epoch（秒）に変換"""
-    if not dt:
-        return None
-    # SlackはUTC epoch（秒）
-    if dt.tzinfo is None and _tz():
-        dt = dt.replace(tzinfo=_tz())
-    return int(dt.timestamp())
-
-def _load_user_map() -> dict:
-    """環境変数からSlackユーザーマップを読み込み"""
-    try:
-        return json.loads(SLACK_USER_MAP_JSON) if SLACK_USER_MAP_JSON else {}
-    except Exception:
-        return {}
-
-def _resolve_slack_user_id(name: Optional[str]) -> Optional[str]:
-    """
-    '田中(PM)' → '田中' 抜き出し → 環境変数マップで Slack ID に解決。
-    """
-    if not name:
-        return None
-    base = re.sub(r"\(.*?\)", "", name).strip()
-    m = _load_user_map()
-    return m.get(base)
-
-def schedule_task_reminders(channel: str, thread_ts: str, d: Draft):
-    """
-    各タスクについてリマインドをスケジュール。
-    - 期日の前日 10:00
-    - 期日 1時間前
-    投稿先：同スレッド。担当者Slack IDが分かればメンション付与。
-    """
-    tasks = parse_tasks_from_actions(d.actions)
-    if not tasks: 
-        return
-
-    for t in tasks:
-        due_dt = _parse_due_to_dt(t.get("due"))
-        if not due_dt:
-            continue
-
-        # 2回分の候補
-        dt_prev_day = (due_dt - timedelta(days=1)).replace(hour=DEFAULT_REMIND_HOUR, minute=0)
-        dt_one_hour = due_dt - timedelta(hours=1)
-
-        for when_dt in [dt_prev_day, dt_one_hour]:
-            post_at = _epoch(when_dt)
-            if not post_at: 
-                continue
-            # 過去はスキップ
-            now_epoch = int(datetime.now(_tz()).timestamp()) if _tz() else int(time.time())
-            if post_at <= now_epoch:
-                continue
-
-            mention = ""
-            uid = _resolve_slack_user_id(t.get("assignee"))
-            if uid:
-                mention = f"<@{uid}> "
-            text = (f"{mention}リマインド：*{t['title']}* "
-                    f"（担当: {t.get('assignee') or '未定'} / 期限: {t.get('due') or '未定'}）")
-
-            try:
-                client_slack.chat_scheduleMessage(
-                    channel=channel,
-                    text=text,
-                    post_at=post_at,
-                    thread_ts=thread_ts
-                )
-            except SlackApiError as e:
-                print(f"[Slack] scheduleMessage failed: {e}")
 
 def post_slack_draft(channel_id: str, draft_id: str, title: str, d: Draft):
     blocks = build_minutes_preview_blocks(draft_id, d)   # ← ここを差し替え
@@ -1584,6 +1463,7 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
             approved_blocks = [{"type":"section","text":{"type":"mrkdwn","text":"*✅ 承認済み議事録*"}}] + build_minutes_preview_blocks(draft_id, d)[:-1]
             if ts:
                 client_slack.chat_update(channel=channel, ts=ts, text="承認済み議事録", blocks=approved_blocks)
+            client_slack.chat_postMessage(channel=channel, thread_ts=ts, text="PDF化・メール送信・Drive保存を実行中...")
 
             # --- ① 議事録PDF（既存）
             pdf_path = PDF_DIR / f"{draft_id}.pdf"
@@ -1614,13 +1494,7 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
                     print(f"[Drive] Upload failed: {e}")
                     drive_file = None
 
-            # --- ⑤ 完了メッセージ（最初に投稿） ---
-            msg = "✅ PDF化・メール送信・Google Drive保存を完了しました。"
-            if drive_file and drive_file.get("webViewLink"):
-                msg += f"\n🔗 Drive: {drive_file['webViewLink']}"
-            client_slack.chat_postMessage(channel=channel, thread_ts=ts, text=msg)
-
-            # --- ⑥ 議事録PDFを添付 ---
+            # --- ⑤ SlackへPDFを2点とも添付 ---
             try:
                 client_slack.files_upload_v2(
                     channels=channel, thread_ts=ts,
@@ -1628,11 +1502,6 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
                     file=str(pdf_path), filename=pdf_path.name,
                     title=f"議事録：{d.title}"
                 )
-            except Exception as e:
-                print(f"[Slack] file upload failed: {e}")
-
-            # --- ⑦ 設計チェックリストPDFを添付 ---
-            try:
                 client_slack.files_upload_v2(
                     channels=channel, thread_ts=ts,
                     initial_comment="設計チェックリストPDFを添付します。",
@@ -1642,7 +1511,7 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
             except Exception as e:
                 print(f"[Slack] file upload failed: {e}")
 
-            # --- ⑧ タスクリストを同スレッドに表示 ---
+            # --- ⑥ タスクリストを同スレッドに表示 ---
             try:
                 client_slack.chat_postMessage(
                     channel=channel, thread_ts=ts,
@@ -1652,12 +1521,11 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
             except Exception as e:
                 print(f"[Slack] tasks post failed: {e}")
 
-            # --- ⑨ リマインドをスケジュール（前日/1時間前） ---
-            try:
-                schedule_task_reminders(channel, ts, d)
-                client_slack.chat_postMessage(channel=channel, thread_ts=ts, text="⏰ タスクのリマインドをスケジュールしました。")
-            except Exception as e:
-                print(f"[Slack] reminder schedule failed: {e}")
+            # 完了メッセージ
+            msg = "✅ PDF化・メール送信・Google Drive保存を完了しました。"
+            if drive_file and drive_file.get("webViewLink"):
+                msg += f"\n🔗 Drive: {drive_file['webViewLink']}"
+            client_slack.chat_postMessage(channel=channel, thread_ts=ts, text=msg)
             return {"ok": True}
 
     # --- モーダル保存 ---
