@@ -637,25 +637,45 @@ def upload_to_drive(file_path: Path):
             service_account_email = "unknown"
         
         meta = {"name": file_path.name}
+        folder_accessible = False
+        
         if GOOGLE_DRIVE_FOLDER_ID:
-            meta["parents"] = [GOOGLE_DRIVE_FOLDER_ID]
-            print(f"[Drive] Uploading to folder: {GOOGLE_DRIVE_FOLDER_ID}")
+            print(f"[Drive] Checking folder access: {GOOGLE_DRIVE_FOLDER_ID}")
             sys.stdout.flush()
             
             # フォルダが存在するか確認
             try:
-                folder = service.files().get(fileId=GOOGLE_DRIVE_FOLDER_ID, supportsAllDrives=True).execute()
-                print(f"[Drive] Folder found: {folder.get('name', 'unknown')}")
+                folder = service.files().get(fileId=GOOGLE_DRIVE_FOLDER_ID, supportsAllDrives=True, fields="id, name, mimeType").execute()
+                print(f"[Drive] Folder found: {folder.get('name', 'unknown')} (ID: {folder.get('id')}, Type: {folder.get('mimeType')})")
+                folder_accessible = True
+                meta["parents"] = [GOOGLE_DRIVE_FOLDER_ID]
                 sys.stdout.flush()
             except HttpError as folder_error:
                 if folder_error.resp.status == 404:
-                    print(f"[Drive] WARNING: Folder not found or service account doesn't have access")
-                    print(f"[Drive] Please share the folder '{GOOGLE_DRIVE_FOLDER_ID}' with the service account email: {service_account_email}")
+                    print(f"[Drive] ERROR: Folder not found or service account doesn't have access")
+                    print(f"[Drive] Folder ID: {GOOGLE_DRIVE_FOLDER_ID}")
+                    print(f"[Drive] Service account email: {service_account_email}")
+                    print(f"[Drive] Please share the folder with the service account email above")
+                    print(f"[Drive] Falling back to root folder upload...")
                     sys.stdout.flush()
-                # 警告を出しても処理は続行（アップロード時にエラーが発生する）
+                    # フォルダが見つからない場合は、ルートフォルダにアップロード
+                    folder_accessible = False
+                else:
+                    print(f"[Drive] Error checking folder: {folder_error}")
+                    sys.stdout.flush()
+                    raise
+        else:
+            print("[Drive] Uploading to root folder (no folder ID specified)")
+            sys.stdout.flush()
+        
+        if folder_accessible:
+            print(f"[Drive] Uploading to folder: {GOOGLE_DRIVE_FOLDER_ID}")
         else:
             print("[Drive] Uploading to root folder")
-            sys.stdout.flush()
+            # ルートフォルダにアップロードする場合はparentsを指定しない
+            if "parents" in meta:
+                del meta["parents"]
+        sys.stdout.flush()
         
         media = MediaFileUpload(str(file_path), mimetype="application/pdf")
         print(f"[Drive] Creating file in Drive...")
@@ -667,12 +687,14 @@ def upload_to_drive(file_path: Path):
             supportsAllDrives=True
         ).execute()
         print(f"[Drive] Upload successful: {f}")
+        print(f"[Drive] File ID: {f.get('id')}")
+        print(f"[Drive] File URL: {f.get('webViewLink')}")
         sys.stdout.flush()
         return f  # {"id": "...", "webViewLink": "..."}
     except HttpError as e:
         if e.resp.status == 404:
             print(f"[Drive] Upload failed: Folder not found or access denied")
-            print(f"[Drive] Please share the folder with the service account email: {service_account_email}")
+            print(f"[Drive] Please share the folder '{GOOGLE_DRIVE_FOLDER_ID}' with the service account email: {service_account_email}")
             print(f"[Drive] Service account email: {service_account_email}")
             sys.stdout.flush()
         print(f"[Drive] Upload failed: {e}")
