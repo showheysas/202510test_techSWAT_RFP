@@ -587,7 +587,9 @@ def get_drive_service(scope: str = "drive.file"):
                     service_account_info,
                     scopes=SCOPES
                 )
-                print("[Drive] Service account credentials loaded from JSON string")
+                service_account_email = service_account_info.get("client_email", "unknown")
+                print(f"[Drive] Service account credentials loaded from JSON string")
+                print(f"[Drive] Service account email: {service_account_email}")
                 sys.stdout.flush()
             except json.JSONDecodeError as e:
                 print(f"[Drive] Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
@@ -623,11 +625,33 @@ def get_drive_service(scope: str = "drive.file"):
 def upload_to_drive(file_path: Path):
     service = get_drive_service("drive.file")
     try:
+        # サービスアカウントのメールアドレスを取得
+        if GOOGLE_SERVICE_ACCOUNT_JSON:
+            try:
+                service_account_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+                service_account_email = service_account_info.get("client_email", "unknown")
+            except:
+                service_account_email = "unknown"
+        else:
+            service_account_email = "unknown"
+        
         meta = {"name": file_path.name}
         if GOOGLE_DRIVE_FOLDER_ID:
             meta["parents"] = [GOOGLE_DRIVE_FOLDER_ID]
             print(f"[Drive] Uploading to folder: {GOOGLE_DRIVE_FOLDER_ID}")
             sys.stdout.flush()
+            
+            # フォルダが存在するか確認
+            try:
+                folder = service.files().get(fileId=GOOGLE_DRIVE_FOLDER_ID, supportsAllDrives=True).execute()
+                print(f"[Drive] Folder found: {folder.get('name', 'unknown')}")
+                sys.stdout.flush()
+            except HttpError as folder_error:
+                if folder_error.resp.status == 404:
+                    print(f"[Drive] WARNING: Folder not found or service account doesn't have access")
+                    print(f"[Drive] Please share the folder '{GOOGLE_DRIVE_FOLDER_ID}' with the service account email: {service_account_email}")
+                    sys.stdout.flush()
+                # 警告を出しても処理は続行（アップロード時にエラーが発生する）
         else:
             print("[Drive] Uploading to root folder")
             sys.stdout.flush()
@@ -645,6 +669,11 @@ def upload_to_drive(file_path: Path):
         sys.stdout.flush()
         return f  # {"id": "...", "webViewLink": "..."}
     except HttpError as e:
+        if e.resp.status == 404:
+            print(f"[Drive] Upload failed: Folder not found or access denied")
+            print(f"[Drive] Please share the folder with the service account email: {service_account_email}")
+            print(f"[Drive] Service account email: {service_account_email}")
+            sys.stdout.flush()
         print(f"[Drive] Upload failed: {e}")
         sys.stdout.flush()
         raise
