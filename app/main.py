@@ -359,201 +359,284 @@ def _escape_html(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 # =========================
-# PDF生成（ReportLab, 日本語折返し対応）
+# PDF生成（リッチ版）: 議事録
 # =========================
 async def create_pdf_async(d: Draft, out_path: Path):
     """
-    ReportLab を使用してPDF生成。
-    - 日本語フォント（HeiseiKakuGo-W5）を登録
-    - 文字幅計測でCJK向けの折返し
-    - ページ下端での自動改ページ
+    リッチレイアウト版（1カラム、メタ情報カード、セクション見出しバー、箇条書き）
     """
     from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
     from reportlab.pdfgen import canvas
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.lib.units import mm
 
-    # ---- ページ設定
+    # ---- ページとスタイル
     PAGE_W, PAGE_H = A4
-    MARGIN_L = 72        # 左 1 inch
-    MARGIN_R = 72        # 右 1 inch
-    MARGIN_T = 36        # 上 0.5 inch
-    MARGIN_B = 36        # 下 0.5 inch
-    LINE_GAP = 15
-    SECTION_GAP = 10
-    TITLE_SIZE = 14
-    BODY_SIZE = 11
-
-    # ---- 日本語フォント登録
-    FONT_NAME = "HeiseiKakuGo-W5"
-    pdfmetrics.registerFont(UnicodeCIDFont(FONT_NAME))
-
-    # ---- レイアウト用関数：横幅に応じた折返し
-    def wrap_cjk(text: str, font_name: str, font_size: int, max_width: float):
-        """
-        日本語CJK向けの1文字ずつ積み上げ折返し。
-        ・英数字やスペースもそのまま1文字単位で計測（単語ベースではなく幅ベース）
-        ・入力の改行(\n)は段落区切りとして扱い、段落ごとにラップ
-        """
-        lines = []
-        if not text:
-            return ["-"]
-
-        for raw_line in text.splitlines() or [""]:
-            if raw_line == "":
-                lines.append("")  # 空行
-                continue
-            buf = ""
-            for ch in raw_line:
-                new_buf = buf + ch
-                w = pdfmetrics.stringWidth(new_buf, font_name, font_size)
-                if w <= max_width:
-                    buf = new_buf
-                else:
-                    if buf:
-                        lines.append(buf)
-                        buf = ch  # 新しい行を現在の文字から開始
-                    else:
-                        # 1文字でも超える場合は強制配置
-                        lines.append(ch)
-                        buf = ""
-            if buf or raw_line == "":
-                lines.append(buf)
-        return lines
-
-    # ---- キャンバス生成
-    c = canvas.Canvas(str(out_path), pagesize=A4)
-
-    def ensure_page_space(current_y: float, needed: float) -> float:
-        """必要行数分の高さが足りなければ改ページ"""
-        if current_y - needed < MARGIN_B:
-            c.showPage()
-            # 新ページでもフォントを再設定
-            c.setFont(FONT_NAME, BODY_SIZE)
-            return PAGE_H - MARGIN_T
-        return current_y
-
-    # ---- タイトル
-    y = PAGE_H - MARGIN_T
-    c.setFont(FONT_NAME, TITLE_SIZE)
-    title_text = f"議事録：{d.meeting_name or d.title or '（無題）'}"
-    c.drawString(MARGIN_L, y, title_text)
-
-    # ---- 本文
-    c.setFont(FONT_NAME, BODY_SIZE)
-    y -= 30
-
-    max_text_width = PAGE_W - (MARGIN_L + MARGIN_R)
-
-    # メタ情報（会議名、日時、参加者、目的）
-    if d.meeting_name or d.datetime_str or d.participants or d.purpose:
-        c.setFont(FONT_NAME, BODY_SIZE)
-        if d.meeting_name:
-            c.drawString(MARGIN_L + 18, y, f"会議名: {d.meeting_name}")
-            y -= LINE_GAP
-        if d.datetime_str:
-            c.drawString(MARGIN_L + 18, y, f"日時: {d.datetime_str}")
-            y -= LINE_GAP
-        if d.participants:
-            c.drawString(MARGIN_L + 18, y, f"参加者: {d.participants}")
-            y -= LINE_GAP
-        if d.purpose:
-            c.drawString(MARGIN_L + 18, y, f"目的: {d.purpose}")
-            y -= LINE_GAP
-        y -= SECTION_GAP
-
-    sections = [
-        ("Summary", d.summary),
-        ("Decision", d.decisions),
-        ("Action",  d.actions),
-        ("Issue",   d.issues),
-        ("Risk",    d.risks),
-    ]
-
-    for label, text in sections:
-        # セクション見出し
-        y = ensure_page_space(y, LINE_GAP * 2)
-        c.drawString(MARGIN_L, y, f"{label}:")
-        y -= 20
-
-        # ラップしてから描画
-        wrapped_lines = wrap_cjk(text, FONT_NAME, BODY_SIZE, max_text_width)
-        for line in wrapped_lines:
-            y = ensure_page_space(y, LINE_GAP)
-            c.drawString(MARGIN_L + 18, y, line)  # 少しインデント
-            y -= LINE_GAP
-
-        y -= SECTION_GAP
-
-    c.save()
-    print("reportlabでPDF生成完了（日本語折返し対応）")
-
-# 追加：設計チェックリストPDF
-def create_design_checklist_pdf(out_path: Path, d: Draft):
-    from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-
-    PAGE_W, PAGE_H = A4
-    MARGIN_L, MARGIN_R, MARGIN_T, MARGIN_B = 72, 72, 50, 36
-    TITLE_SIZE, H_SIZE, BODY = 16, 13, 11
-    LINE = 18
+    MARGIN_L, MARGIN_R, MARGIN_T, MARGIN_B = 20*mm, 20*mm, 18*mm, 18*mm
+    TITLE_SIZE, H_SIZE, BODY_SIZE, META_SIZE, SMALL = 16, 12, 10.5, 10, 9
+    LINE_GAP, PARA_GAP, SEC_GAP = 5.2*mm, 3.2*mm, 6.5*mm
 
     pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
     c = canvas.Canvas(str(out_path), pagesize=A4)
 
-    def yline(y): return y - LINE
-    def draw_title(txt, y):
-        c.setFont("HeiseiKakuGo-W5", TITLE_SIZE); c.drawString(MARGIN_L, y, txt); return yline(y)-6
-    def draw_head(k, v, y):
-        c.setFont("HeiseiKakuGo-W5", BODY); c.drawString(MARGIN_L, y, f"{k}：{v or '-'}"); return yline(y)
-    def draw_h(txt, y):
-        c.setFont("HeiseiKakuGo-W5", H_SIZE); c.drawString(MARGIN_L, y, f"■ {txt}"); return yline(y)
-    def draw_box_item(txt, y):
-        c.setFont("HeiseiKakuGo-W5", BODY)
-        c.rect(MARGIN_L, y-12, 10, 10, stroke=1, fill=0)
-        c.drawString(MARGIN_L+16, y-2, txt); return yline(y)
+    # 共通色
+    C_PRIMARY = colors.HexColor("#1f2937")   # 見出し文字
+    C_ACCENT  = colors.HexColor("#2563eb")   # 青アクセント
+    C_BORDER  = colors.HexColor("#e5e7eb")   # 薄い罫線
+    C_MUTED   = colors.HexColor("#6b7280")   # 補助文字
+    C_BAR     = colors.HexColor("#f3f4f6")   # セクション見出しバー
 
+    # 文字幅ラップ（CJK向け、既存のロジックを簡潔化）
+    def wrap_cjk(text: str, font_name: str, font_size: int, max_width: float):
+        from reportlab.pdfbase import pdfmetrics
+        if not text:
+            return ["-"]
+        lines = []
+        for raw in (text or "").splitlines():
+            if raw == "":
+                lines.append("")
+                continue
+            buf = ""
+            for ch in raw:
+                nb = buf + ch
+                if pdfmetrics.stringWidth(nb, font_name, font_size) <= max_width:
+                    buf = nb
+                else:
+                    if buf:
+                        lines.append(buf); buf = ch
+                    else:
+                        lines.append(ch); buf = ""
+            if buf or raw == "":
+                lines.append(buf)
+        return lines
+
+    # 余白計算
+    X0, X1 = MARGIN_L, PAGE_W - MARGIN_R
+    CONTENT_W = X1 - X0
     y = PAGE_H - MARGIN_T
-    y = draw_title("設計チェックリスト", y)
-    y = draw_head("会議名", d.meeting_name or d.title, y)
-    y = draw_head("日時", d.datetime_str, y)
-    y = draw_head("目的", d.purpose, y)
-    y -= 6
+
+    # ヘッダ（タイトル）
+    c.setFont("HeiseiKakuGo-W5", TITLE_SIZE)
+    c.setFillColor(C_PRIMARY)
+    c.drawString(X0, y, "議事録")
+    c.setFont("HeiseiKakuGo-W5", SMALL)
+    c.setFillColor(C_MUTED)
+    c.drawRightString(X1, y, d.datetime_str or "")
+    y -= 8*mm
+
+    # メタ情報カード（薄い枠＋フィールド2列）
+    def meta_row(label: str, value: str, y):
+        c.setFont("HeiseiKakuGo-W5", META_SIZE)
+        c.setFillColor(C_MUTED)
+        c.drawString(X0+6*mm, y, f"{label}")
+        c.setFillColor(colors.black)
+        c.drawString(X0+30*mm, y, value or "-")
+        return y - 6*mm
+
+    # カード枠
+    card_top = y
+    card_h = 28*mm
+    c.setStrokeColor(C_BORDER); c.setLineWidth(0.6)
+    # ReportLabにはroundRectがないため、通常のrectを使用
+    c.rect(X0, card_top - card_h, CONTENT_W, card_h, stroke=1, fill=0)
+
+    y = card_top - 7*mm
+    y = meta_row("会議名",  d.meeting_name or d.title or "（無題）", y)
+    y = meta_row("日時",    d.datetime_str or "-", y)
+    y = meta_row("参加者",  d.participants or "-", y)
+    y = meta_row("目的",    d.purpose or "-", y)
+
+    y -= 3*mm
+
+    # ページ残量チェック
+    def new_page():
+        nonlocal y
+        c.showPage()
+        c.setFont("HeiseiKakuGo-W5", BODY_SIZE)
+        y = PAGE_H - MARGIN_T
+
+    # セクション見出しバー
+    def section_bar(title: str):
+        nonlocal y
+        if y - 10*mm < MARGIN_B:
+            new_page()
+        c.setFillColor(C_BAR)
+        c.rect(X0, y-7*mm, CONTENT_W, 9*mm, stroke=0, fill=1)
+        c.setFont("HeiseiKakuGo-W5", H_SIZE)
+        c.setFillColor(C_PRIMARY)
+        c.drawString(X0+6*mm, y-5*mm, title)
+        y -= 12*mm
+
+    # 箇条書き描画
+    def draw_paragraph(label: str, text: str):
+        nonlocal y
+        section_bar(label)
+        c.setFont("HeiseiKakuGo-W5", BODY_SIZE)
+        c.setFillColor(colors.black)
+        maxw = CONTENT_W - 6*mm
+        for ln in wrap_cjk(text, "HeiseiKakuGo-W5", BODY_SIZE, maxw):
+            if y - 6*mm < MARGIN_B:
+                new_page()
+            # 行頭マーカー（丸）
+            if ln.strip().startswith("・"):
+                marker_y = y - 1.2*mm
+                c.setFillColor(C_ACCENT)
+                c.circle(X0+4*mm, marker_y, 1.4*mm, stroke=0, fill=1)
+                c.setFillColor(colors.black)
+                c.drawString(X0+8*mm, y, ln.lstrip("・"))
+            else:
+                c.drawString(X0+6*mm, y, ln)
+            y -= 4.8*mm
+        y -= SEC_GAP
+
+    # 本文セクション
+    c.setFont("HeiseiKakuGo-W5", BODY_SIZE)
+    for label, val in [
+        ("サマリー", d.summary),
+        ("決定事項", d.decisions),
+        ("未決定事項", d.issues),
+        ("アクション", d.actions),
+        ("リスク", d.risks),
+    ]:
+        draw_paragraph(label, val or "-")
+
+    # フッター（ページ番号）
+    c.setFont("HeiseiKakuGo-W5", SMALL)
+    c.setFillColor(C_MUTED)
+    c.drawCentredString(PAGE_W/2, MARGIN_B-6*mm, "Generated by Minutes Bot")
+    c.showPage()
+    c.save()
+
+# =========================
+# PDF生成（リッチ版）: 設計チェックリスト
+# =========================
+def create_design_checklist_pdf(out_path: Path, d: Draft):
+    """
+    リッチレイアウト版（カラー見出し・チェックボックス群・署名欄）
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.pdfgen import canvas
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.lib.units import mm
+
+    PAGE_W, PAGE_H = A4
+    MARGIN_L, MARGIN_R, MARGIN_T, MARGIN_B = 20*mm, 20*mm, 18*mm, 18*mm
+    TITLE_SIZE, H_SIZE, BODY, SMALL = 16, 12, 10.5, 9
+    GAP, LINE = 5*mm, 5.2*mm
+
+    pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
+    c = canvas.Canvas(str(out_path), pagesize=A4)
+
+    # 色
+    C_TITLE   = colors.HexColor("#111827")
+    C_BORDER  = colors.HexColor("#e5e7eb")
+    C_MUTED   = colors.HexColor("#6b7280")
+    C_H1      = colors.HexColor("#10b981")  # 緑
+    C_H2      = colors.HexColor("#f59e0b")  # 橙
+    C_H3      = colors.HexColor("#3b82f6")  # 青
+    C_BAR     = colors.HexColor("#f9fafb")
+
+    def hbar(y, label, color):
+        c.setFillColor(C_BAR)
+        c.rect(MARGIN_L, y-7*mm, PAGE_W - MARGIN_L - MARGIN_R, 9*mm, stroke=0, fill=1)
+        c.setFillColor(color)
+        c.circle(MARGIN_L+4*mm, y-2.5*mm, 2*mm, stroke=0, fill=1)
+        c.setFillColor(C_TITLE)
+        c.setFont("HeiseiKakuGo-W5", H_SIZE)
+        c.drawString(MARGIN_L+9*mm, y-5*mm, label)
+        return y - 11*mm
+
+    def checkbox(y, text):
+        c.setStrokeColor(C_BORDER); c.setLineWidth(1)
+        c.rect(MARGIN_L, y-4.2*mm, 4*mm, 4*mm, stroke=1, fill=0)
+        c.setFillColor(C_TITLE)
+        c.setFont("HeiseiKakuGo-W5", BODY)
+        c.drawString(MARGIN_L+6*mm, y-1*mm, text)
+        return y - LINE
+
+    # タイトル
+    c.setFont("HeiseiKakuGo-W5", TITLE_SIZE)
+    c.setFillColor(C_TITLE)
+    c.drawString(MARGIN_L, PAGE_H - MARGIN_T, "設計チェックリスト")
+    c.setFont("HeiseiKakuGo-W5", SMALL)
+    c.setFillColor(C_MUTED)
+    c.drawRightString(PAGE_W - MARGIN_R, PAGE_H - MARGIN_T, "各フェーズで使用")
+
+    y = PAGE_H - MARGIN_T - 10*mm
+
+    # メタ情報
+    c.setFont("HeiseiKakuGo-W5", BODY)
+    c.setFillColor(C_TITLE)
+    metas = [
+        ("会議名", d.meeting_name or d.title or "（無題）"),
+        ("日時",   d.datetime_str or "-"),
+        ("目的",   d.purpose or "-"),
+    ]
+    for k,v in metas:
+        c.setFillColor(C_MUTED); c.drawString(MARGIN_L, y, f"{k}")
+        c.setFillColor(C_TITLE); c.drawString(MARGIN_L+18*mm, y, v)
+        y -= 6*mm
+    y -= 2*mm
 
     # DoR
-    y = draw_h("作業を始める前の準備（DoR: Definition of Ready）", y)
+    y = hbar(y, "作業を始める前の準備（DoR: Definition of Ready）", C_H1)
     for item in [
         "要件定義書ができている",
         "ユーザーストーリーが明確に定義されている",
         "技術的制約が共有されている",
-        "デザインシステム/ガイドライン等設定済み",
-    ]: y = draw_box_item(item, y)
+        "デザインシステム／ガイドライン等設定済み",
+    ]:
+        y = checkbox(y, item)
 
-    y -= 6
+    y -= GAP
+
     # ハンドオフ
-    y = draw_h("デザイン引き渡し（ハンドオフ）", y)
+    y = hbar(y, "デザイン引き渡し（ハンドオフ）", C_H2)
     for item in [
-        "画面フロー・経路図", "ワイヤーフレーム（全画面）", "UIコンポーネント仕様",
-        "インタラクション/アニメーション定義", "レスポンシブ対応仕様",
+        "画面フロー・経路図",
+        "ワイヤーフレーム（全画面）",
+        "UIコンポーネント仕様",
+        "インタラクション／アニメーション定義",
+        "レスポンシブ対応仕様",
         "アクセシビリティ対応（WCAG AA相当）",
-    ]: y = draw_box_item(item, y)
+    ]:
+        y = checkbox(y, item)
 
-    y -= 6
+    y -= GAP
+
     # DoD
-    y = draw_h("作業完了の確認（DoD: Definition of Done）", y)
+    y = hbar(y, "作業完了の確認（DoD: Definition of Done）", C_H3)
     for item in [
-        "デザインレビュー完了", "関係者の最終確認完了",
-        "アセット（画像・アイコン）共有済み",
-        "最新デザインファイルがマージ済み",
-        "エンジニアへの巻き書き/仕様書が完了",
-    ]: y = draw_box_item(item, y)
+        "デザインレビューが完了している",
+        "関係者の最終合意が完了している",
+        "アセット（画像・アイコン）が共有されている",
+        "デザインファイルが最新版でマージ済みである",
+        "エンジニアへの巻き書き／仕様書が完了している",
+    ]:
+        y = checkbox(y, item)
 
     # 署名欄
-    y -= 10; c.setFont("HeiseiKakuGo-W5", BODY)
-    for role in ["デザイナー", "エンジニア", "PM"]:
-        c.drawString(MARGIN_L, y, f"{role} 署名：_________________________"); y = yline(y)
+    y -= 8*mm
+    c.setFillColor(C_TITLE)
+    c.setFont("HeiseiKakuGo-W5", BODY)
+    labels = ["デザイナー", "エンジニア", "PM", "確認日"]
+    col_w = (PAGE_W - MARGIN_L - MARGIN_R) / 2
+    for i, lab in enumerate(labels):
+        x = MARGIN_L + (i%2)*col_w
+        c.drawString(x, y, f"{lab}")
+        c.setStrokeColor(C_BORDER); c.setLineWidth(0.8)
+        c.line(x, y-3*mm, x + col_w - 10*mm, y-3*mm)
+        if i%2==1: y -= 10*mm
+
+    # フッター
+    c.setFont("HeiseiKakuGo-W5", SMALL)
+    c.setFillColor(C_MUTED)
+    c.drawString(MARGIN_L, MARGIN_B-6*mm, "このチェックリストは設計移管者と各関係者で確認するためのツールです。")
+    c.showPage()
     c.save()
 
 # --- Gmail送信 ---
@@ -629,7 +712,7 @@ def get_drive_service(scope: str = "drive.file"):
         print(f"[Drive] Failed to initialize Drive service: {e}")
         sys.stdout.flush()
         raise
-
+        
 # --- Google Drive保存（リンク返却 & 共有ドライブ対応） ---
 def upload_to_drive(file_path: Path):
     # 共有フォルダにアクセスするため、"drive"スコープ（フルアクセス）を使用
@@ -656,9 +739,9 @@ def upload_to_drive(file_path: Path):
             try:
                 folder = service.files().get(fileId=GOOGLE_DRIVE_FOLDER_ID, supportsAllDrives=True, fields="id, name, mimeType").execute()
                 print(f"[Drive] Folder found: {folder.get('name', 'unknown')} (ID: {folder.get('id')}, Type: {folder.get('mimeType')})")
+                sys.stdout.flush()
                 folder_accessible = True
                 meta["parents"] = [GOOGLE_DRIVE_FOLDER_ID]
-                sys.stdout.flush()
             except HttpError as folder_error:
                 if folder_error.resp.status == 404:
                     print(f"[Drive] ERROR: Folder not found or service account doesn't have access")
@@ -1445,27 +1528,27 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
             client_slack.chat_postMessage(channel=channel, thread_ts=ts, text=msg)
             return {"ok": True}
 
-        # --- モーダル保存 ---
-        if ptype == "view_submission" and payload["view"]["callback_id"] == "edit_submit":
-            draft_id = payload["view"]["private_metadata"]
-            state = payload["view"]["state"]["values"]
-            updated = Draft(
-                title="",
-                summary=state.get("summary", {}).get("inp", {}).get("value", ""),
-                decisions=state.get("decisions", {}).get("inp", {}).get("value", ""),
-                actions=state.get("actions", {}).get("inp", {}).get("value", ""),
-                issues=state.get("issues", {}).get("inp", {}).get("value", ""),
-                meeting_name=state.get("meeting_name", {}).get("inp", {}).get("value", ""),
-                datetime_str=state.get("datetime_str", {}).get("inp", {}).get("value", ""),
-                participants=state.get("participants", {}).get("inp", {}).get("value", ""),
-                purpose=state.get("purpose", {}).get("inp", {}).get("value", ""),
-                risks=state.get("risks", {}).get("inp", {}).get("value", ""),
-            )
-            save_json(SUMM_DIR / f"{draft_id}.json", updated.dict())
-            meta = DRAFT_META.get(draft_id, {})
-            channel, ts = meta.get("channel"), meta.get("ts")
-            if channel and ts:
-                client_slack.chat_update(channel=channel, ts=ts, text="下書きを更新しました", blocks=build_minutes_preview_blocks(draft_id, updated))
-            return JSONResponse({"response_action": "clear"})
+    # --- モーダル保存 ---
+    if ptype == "view_submission" and payload["view"]["callback_id"] == "edit_submit":
+        draft_id = payload["view"]["private_metadata"]
+        state = payload["view"]["state"]["values"]
+        updated = Draft(
+            title="",
+            summary=state.get("summary", {}).get("inp", {}).get("value", ""),
+            decisions=state.get("decisions", {}).get("inp", {}).get("value", ""),
+            actions=state.get("actions", {}).get("inp", {}).get("value", ""),
+            issues=state.get("issues", {}).get("inp", {}).get("value", ""),
+            meeting_name=state.get("meeting_name", {}).get("inp", {}).get("value", ""),
+            datetime_str=state.get("datetime_str", {}).get("inp", {}).get("value", ""),
+            participants=state.get("participants", {}).get("inp", {}).get("value", ""),
+            purpose=state.get("purpose", {}).get("inp", {}).get("value", ""),
+            risks=state.get("risks", {}).get("inp", {}).get("value", ""),
+        )
+        save_json(SUMM_DIR / f"{draft_id}.json", updated.dict())
+        meta = DRAFT_META.get(draft_id, {})
+        channel, ts = meta.get("channel"), meta.get("ts")
+        if channel and ts:
+            client_slack.chat_update(channel=channel, ts=ts, text="下書きを更新しました", blocks=build_minutes_preview_blocks(draft_id, updated))
+        return JSONResponse({"response_action": "clear"})
 
     return {"ok": True}
