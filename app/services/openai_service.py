@@ -6,8 +6,13 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from config import client_oa
-from models import Draft
+# Azure App Service環境とローカル開発環境の両方に対応
+try:
+    from app.config import client_oa
+    from app.models import Draft
+except ImportError:
+    from config import client_oa
+    from models import Draft
 
 
 def transcribe_audio(file_path: Path) -> str:

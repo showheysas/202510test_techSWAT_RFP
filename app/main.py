@@ -37,21 +37,37 @@ from googleapiclient.errors import HttpError
 # リファクタリングされたモジュールのインポート
 # =========================
 # Phase 1: 基盤構築
-from config import (
-    OPENAI_API_KEY, SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, DEFAULT_SLACK_CHANNEL,
-    GMAIL_USER, GMAIL_PASS,
-    GOOGLE_DRIVE_FOLDER_ID, GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_SERVICE_ACCOUNT_PATH,
-    NOTTA_DRIVE_FOLDER_ID, GOOGLE_DRIVE_WATCH_ENABLED, GOOGLE_DRIVE_WEBHOOK_SECRET,
-    GOOGLE_DRIVE_POLL_INTERVAL,
-    SLACK_USER_MAP_JSON, DEFAULT_REMIND_HOUR,
-    client_oa, client_slack,
-    BASE_DIR, DATA_DIR, UPLOAD_DIR, TRANS_DIR, SUMM_DIR, PDF_DIR
-)
-from models import Draft
-from utils.storage import save_json
-
-# Phase 2: OpenAIサービス
-from services.openai_service import transcribe_audio, summarize_to_structured
+# Azure App Serviceでは app.main:app で起動するため、app. プレフィックスが必要
+try:
+    # Azure App Service環境（プロジェクトルートから実行）
+    from app.config import (
+        OPENAI_API_KEY, SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, DEFAULT_SLACK_CHANNEL,
+        GMAIL_USER, GMAIL_PASS,
+        GOOGLE_DRIVE_FOLDER_ID, GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_SERVICE_ACCOUNT_PATH,
+        NOTTA_DRIVE_FOLDER_ID, GOOGLE_DRIVE_WATCH_ENABLED, GOOGLE_DRIVE_WEBHOOK_SECRET,
+        GOOGLE_DRIVE_POLL_INTERVAL,
+        SLACK_USER_MAP_JSON, DEFAULT_REMIND_HOUR,
+        client_oa, client_slack,
+        BASE_DIR, DATA_DIR, UPLOAD_DIR, TRANS_DIR, SUMM_DIR, PDF_DIR
+    )
+    from app.models import Draft
+    from app.utils.storage import save_json
+    from app.services.openai_service import transcribe_audio, summarize_to_structured
+except ImportError:
+    # ローカル開発環境（appディレクトリから直接実行）
+    from config import (
+        OPENAI_API_KEY, SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, DEFAULT_SLACK_CHANNEL,
+        GMAIL_USER, GMAIL_PASS,
+        GOOGLE_DRIVE_FOLDER_ID, GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_SERVICE_ACCOUNT_PATH,
+        NOTTA_DRIVE_FOLDER_ID, GOOGLE_DRIVE_WATCH_ENABLED, GOOGLE_DRIVE_WEBHOOK_SECRET,
+        GOOGLE_DRIVE_POLL_INTERVAL,
+        SLACK_USER_MAP_JSON, DEFAULT_REMIND_HOUR,
+        client_oa, client_slack,
+        BASE_DIR, DATA_DIR, UPLOAD_DIR, TRANS_DIR, SUMM_DIR, PDF_DIR
+    )
+    from models import Draft
+    from utils.storage import save_json
+    from services.openai_service import transcribe_audio, summarize_to_structured
 
 # =========================
 # グローバル変数（メモリ管理）
