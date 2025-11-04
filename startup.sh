@@ -9,6 +9,6 @@ source /antenv/bin/activate
 
 # GunicornでFastAPIアプリを起動
 # Azure App Serviceは環境変数PORTを使用するため、自動的にポートを設定
-exec gunicorn --bind 0.0.0.0:8000 --workers 2 --timeout 300 --worker-class uvicorn.workers.UvicornWorker app.main:app
+exec gunicorn --bind 0.0.0.0:8000 --workers 1 --timeout 300 --worker-class uvicorn.workers.UvicornWorker app.main:app
 
 
