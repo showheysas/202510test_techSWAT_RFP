@@ -132,7 +132,7 @@ def schedule_task_reminders(channel: str, thread_ts: str, d: Draft):
         uid = _resolve_slack_user_id(t.get("assignee"))
         if uid:
             mention = f"<@{uid}> "
-        text = (f"{mention}リマインド：*{t['title']}* "
+        text = (f"{mention}🔔 ⏰ リマインド：*{t['title']}* "
                 f"（担当: {t.get('assignee') or '未定'} / 期限: {t.get('due') or '未定'}）")
 
         try:

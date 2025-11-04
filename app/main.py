@@ -1204,15 +1204,8 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
     if ptype == "block_actions":
         action = payload["actions"][0]
         action_id = action["action_id"]
-        draft_id = action.get("value")
-        summ_path = SUMM_DIR / f"{draft_id}.json"
-        data = json.loads(summ_path.read_text(encoding="utf-8"))
-        d = Draft(**data)
-
-        if action_id == "edit":
-            client_slack.views_open(trigger_id=payload["trigger_id"], view=build_edit_modal(draft_id, d))
-            return JSONResponse({"response_action": "clear"})
-
+        
+        # task_completeの場合は特別処理（valueが"{draft_id}:{task_index}"形式のため）
         if action_id == "task_complete":
             # タスク完了処理
             value = action.get("value", "")
@@ -1230,6 +1223,16 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
                             update_task_block_in_slack(channel, message_ts, updated_blocks)
                 except (ValueError, IndexError) as e:
                     print(f"[Task] Error processing task complete: {e}")
+            return JSONResponse({"response_action": "clear"})
+        
+        # その他のアクション（edit, approveなど）ではvalueがdraft_id
+        draft_id = action.get("value")
+        summ_path = SUMM_DIR / f"{draft_id}.json"
+        data = json.loads(summ_path.read_text(encoding="utf-8"))
+        d = Draft(**data)
+
+        if action_id == "edit":
+            client_slack.views_open(trigger_id=payload["trigger_id"], view=build_edit_modal(draft_id, d))
             return JSONResponse({"response_action": "clear"})
 
         if action_id == "approve":
