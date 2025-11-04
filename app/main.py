@@ -18,14 +18,10 @@ except Exception:
 
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Request, Header
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from dotenv import load_dotenv
+# 注: dotenv.load_dotenv() は config.py で実行済み
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
-
-# ---- OpenAI SDK（Whisper & GPT要約）----
-from openai import OpenAI
 
 # ---- Gmail, Drive ----
 import smtplib
@@ -38,171 +34,41 @@ from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
 
 # =========================
-# 初期化
+# リファクタリングされたモジュールのインポート
 # =========================
-load_dotenv()
+# Phase 1: 基盤構築
+from config import (
+    OPENAI_API_KEY, SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, DEFAULT_SLACK_CHANNEL,
+    GMAIL_USER, GMAIL_PASS,
+    GOOGLE_DRIVE_FOLDER_ID, GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_SERVICE_ACCOUNT_PATH,
+    NOTTA_DRIVE_FOLDER_ID, GOOGLE_DRIVE_WATCH_ENABLED, GOOGLE_DRIVE_WEBHOOK_SECRET,
+    GOOGLE_DRIVE_POLL_INTERVAL,
+    SLACK_USER_MAP_JSON, DEFAULT_REMIND_HOUR,
+    client_oa, client_slack,
+    BASE_DIR, DATA_DIR, UPLOAD_DIR, TRANS_DIR, SUMM_DIR, PDF_DIR
+)
+from models import Draft
+from utils.storage import save_json
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
-SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET", "")
-DEFAULT_SLACK_CHANNEL = os.getenv("SLACK_CHANNEL_ID", "")
-GMAIL_USER = os.getenv("GMAIL_USER", "")
-GMAIL_PASS = os.getenv("GMAIL_PASS", "")
-GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
-# サービスアカウント認証情報（JSONファイルの内容を文字列として設定可能・推奨）
-GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-# サービスアカウント認証情報（ファイルパス指定）
-GOOGLE_SERVICE_ACCOUNT_PATH = os.getenv("GOOGLE_SERVICE_ACCOUNT_PATH", "")
+# Phase 2: OpenAIサービス
+from services.openai_service import transcribe_audio, summarize_to_structured
 
-# Notta Google Drive連携
-NOTTA_DRIVE_FOLDER_ID = os.getenv("NOTTA_DRIVE_FOLDER_ID", "")
-GOOGLE_DRIVE_WATCH_ENABLED = os.getenv("GOOGLE_DRIVE_WATCH_ENABLED", "false").lower() == "true"
-# Google Drive Webhook検証用シークレット
-GOOGLE_DRIVE_WEBHOOK_SECRET = os.getenv("GOOGLE_DRIVE_WEBHOOK_SECRET", "")
-# Google Drive ポーリング間隔（秒、デフォルト1分）
-GOOGLE_DRIVE_POLL_INTERVAL = int(os.getenv("GOOGLE_DRIVE_POLL_INTERVAL", "60"))
-
-# Slack リマインド設定
-SLACK_USER_MAP_JSON = os.getenv("SLACK_USER_MAP_JSON", "")  # 例: {"田中":"U0123...", "佐藤":"U0456..."}
-DEFAULT_REMIND_HOUR = int(os.getenv("DEFAULT_REMIND_HOUR", "10"))  # 期限日に何時にリマインドするか(ローカル時間)
-
+# =========================
+# グローバル変数（メモリ管理）
+# =========================
 DRAFT_META = {}
 # Drive Push通知チャンネル情報の保存（メモリ）
 DRIVE_WATCH_CHANNEL_INFO = {}
 # ポーリングタスクの停止フラグ
 _polling_task = None
 
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY が未設定です。")
-if not SLACK_BOT_TOKEN:
-    raise RuntimeError("SLACK_BOT_TOKEN が未設定です。")
-if not GMAIL_USER or not GMAIL_PASS:
-    print("⚠️ Gmail設定が未設定です。メール送信はスキップされます。")
-
-client_oa = OpenAI(api_key=OPENAI_API_KEY)
-client_slack = WebClient(token=SLACK_BOT_TOKEN)
-
-BASE_DIR = Path(__file__).parent
-DATA_DIR = BASE_DIR / "data"
-UPLOAD_DIR = DATA_DIR / "uploads"
-TRANS_DIR = DATA_DIR / "transcripts"
-SUMM_DIR = DATA_DIR / "summaries"
-PDF_DIR = DATA_DIR / "pdf"
-for d in (UPLOAD_DIR, TRANS_DIR, SUMM_DIR, PDF_DIR):
-    d.mkdir(parents=True, exist_ok=True)
-
 app = FastAPI(title="Minutes Ingest + PDF(ReportLab) + Gmail + Drive")
-
-# =========================
-# モデル
-# =========================
-class Draft(BaseModel):
-    # 既存
-    title: str
-    summary: str
-    decisions: str
-    actions: str
-    issues: str
-    # 追加（任意入力・空でOK）
-    meeting_name: str = ""     # 例：Q3プロジェクトロードマッププレビュー
-    datetime_str: str = ""     # 例：2025年10月25日 | 14:00-16:00
-    participants: str = ""     # 例：田中(PM), 佐藤(デザイナー), ...
-    purpose: str = ""          # 例：Q3のロードマップを確認し優先順位を決定する
-    risks: str = ""            # 箇条書き想定（なければ空）
 
 # =========================
 # 内部ヘルパ
 # =========================
-def transcribe_audio(file_path: Path) -> str:
-    """Whisperで文字起こし"""
-    with file_path.open("rb") as f:
-        result = client_oa.audio.transcriptions.create(
-            model="whisper-1",
-            file=f
-        )
-    return getattr(result, "text", "") or result.__dict__.get("text", "")
-
-def summarize_to_structured(text: str) -> Draft:
-    """GPTで要約"""
-    sys = """You are a meeting minutes assistant. Analyze the transcript and return JSON with the following structure:
-    
-    Required fields (extract from transcript or infer):
-    - meeting_name: Meeting title or topic (extract if mentioned, otherwise use first few sentences)
-    - datetime_str: Date and time if available in transcript, otherwise leave empty
-    - participants: List of participants mentioned (convert to string: "name1, name2, ...")
-    - purpose: Meeting purpose or agenda
-    - summary: Overall summary of the meeting (important - this should be a comprehensive paragraph)
-    - decisions: Decisions made during the meeting (use bullet points with "・" prefix for multiple items)
-    - actions: Action items extracted from transcript - MUST identify tasks mentioned even if assignee/date not specified. 
-      Format each as: "・task_description（担当：person_name、期限：estimated_date）"
-      If no assignee mentioned, infer from context or use "担当：未定"
-      If no date mentioned, estimate reasonable deadline or use "期限：未定"
-    - issues: Open issues or concerns that remain unresolved (use bullet points with "・" prefix)
-    - risks: Identified risks, challenges, or potential problems (use bullet points with "・" prefix)
-    
-    CRITICAL:
-    - You MUST extract actions from the transcript even if not explicitly stated as "action items"
-    - Look for phrases like "next steps", "we should", "need to", "will do", etc.
-    - Always populate actions field - if nothing specific, at least extract implicit tasks from the summary
-    - risks field must be populated - identify any potential problems, challenges, or concerns mentioned
-    
-    Return ALL fields as strings. For multi-line content, use newline characters."""
-    user = f"以下は会議の文字起こしです。日本語で要約してください。\n---\n{text}"
-    resp = client_oa.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role":"system","content":sys},{"role":"user","content":user}],
-        temperature=0.2,
-    )
-    content = resp.choices[0].message.content.strip()
-    if "```" in content:
-        content = content.split("```")[1]
-        if content.strip().startswith("json"):
-            content = content.split("\n", 1)[1]
-    try:
-        data = json.loads(content)
-    except:
-        return Draft(title="", summary=content, decisions="", actions="", issues="", meeting_name="", datetime_str="", participants="", purpose="", risks="")
-    def _norm(x):
-        if isinstance(x, list):
-            return "\n".join([f"・{i}" for i in x])
-        elif isinstance(x, dict):
-            if 'action' in x and 'responsible' in x:
-                return f"・{x['action']}（担当：{x['responsible']}）"
-            elif 'action' in x:
-                return f"・{x['action']}"
-            else:
-                return "\n".join([f"・{k}: {v}" for k, v in x.items()])
-        return str(x)
-    # 文字列変換ヘルパー
-    def _to_str(x):
-        if x is None:
-            return ""
-        if isinstance(x, list):
-            return ", ".join(str(i) for i in x)
-        return str(x)
-    
-    # アクションが空の場合は空文字ではなく警告を設定
-    actions_text = _norm(data.get("actions",""))
-    if not actions_text or actions_text.strip() == "":
-        actions_text = "アクションアイテムが特定できませんでした"
-    
-    # リスクが空の場合は空文字ではなく警告を設定
-    risks_text = _norm(data.get("risks",""))
-    if not risks_text or risks_text.strip() == "":
-        risks_text = "特になし"
-    
-    return Draft(
-        title="",
-        summary=_norm(data.get("summary","")),
-        decisions=_norm(data.get("decisions","")),
-        actions=actions_text,
-        issues=_norm(data.get("issues","")),
-        meeting_name=_to_str(data.get("meeting_name")),
-        datetime_str=_to_str(data.get("datetime_str")),
-        participants=_to_str(data.get("participants")),
-        purpose=_to_str(data.get("purpose")),
-        risks=risks_text,
-    )
+# 注: transcribe_audio と summarize_to_structured は services/openai_service.py からインポート済み
+# 注: save_json は utils/storage.py からインポート済み
 
 def verify_slack_signature(body: bytes, timestamp: str, signature: str):
     if not SLACK_SIGNING_SECRET:
@@ -482,9 +348,7 @@ def build_edit_modal(draft_id: str, d: Draft):
         ]
     }
 
-def save_json(path: Path, data: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+# 注: save_json は utils/storage.py からインポート済み
 
 def _escape_html(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
