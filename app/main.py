@@ -61,6 +61,11 @@ try:
         parse_tasks_from_actions,
         post_slack_draft
     )
+    from app.services.task_service import (
+        schedule_task_reminders,
+        mark_task_complete,
+        update_task_block_in_slack
+    )
 except ImportError:
     # ローカル開発環境（appディレクトリから直接実行）
     from config import (
@@ -84,6 +89,11 @@ except ImportError:
         parse_tasks_from_actions,
         post_slack_draft
     )
+    from services.task_service import (
+        schedule_task_reminders,
+        mark_task_complete,
+        update_task_block_in_slack
+    )
 
 # =========================
 # グローバル変数（メモリ管理）
@@ -103,122 +113,7 @@ app = FastAPI(title="Minutes Ingest + PDF(ReportLab) + Gmail + Drive")
 # 注: save_json は utils/storage.py からインポート済み
 # 注: Slack関連の関数は services/slack_service.py からインポート済み
 
-# リマインド機能用ヘルパー関数
-def _tz():
-    """JST固定（必要なら環境変数で切替）"""
-    if ZoneInfo:
-        return ZoneInfo("Asia/Tokyo")
-    # フォールバック：naive扱い
-    return None
-
-def _parse_due_to_dt(due_str: Optional[str]) -> Optional[datetime]:
-    """
-    '10/25' '2025/10/25' '2025-10-25 15:00' などをJST日付に解釈。
-    時刻未指定なら DEFAULT_REMIND_HOUR:00 を設定。
-    """
-    if not due_str:
-        return None
-    s = due_str.strip()
-    # よくある表記を順にトライ
-    fmt_candidates = [
-        "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M",
-        "%Y-%m-%d", "%Y/%m/%d",
-        "%m/%d",  # 年なし（今年扱い）
-    ]
-    now = datetime.now(_tz())
-    for fmt in fmt_candidates:
-        try:
-            dt = datetime.strptime(s, fmt)
-            # 年なし → 今年
-            if fmt == "%m/%d":
-                dt = dt.replace(year=now.year)
-            # 時刻なければデフォ時刻
-            if fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d"):
-                dt = dt.replace(hour=DEFAULT_REMIND_HOUR, minute=0)
-            # タイムゾーン付与
-            if _tz():
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=_tz())
-            return dt
-        except ValueError:
-            continue
-    return None
-
-def _epoch(dt: datetime) -> Optional[int]:
-    """datetimeをUTC epoch（秒）に変換"""
-    if not dt:
-        return None
-    # SlackはUTC epoch（秒）
-    if dt.tzinfo is None and _tz():
-        dt = dt.replace(tzinfo=_tz())
-    return int(dt.timestamp())
-
-def _load_user_map() -> dict:
-    """環境変数からSlackユーザーマップを読み込み"""
-    try:
-        return json.loads(SLACK_USER_MAP_JSON) if SLACK_USER_MAP_JSON else {}
-    except Exception:
-        return {}
-
-def _resolve_slack_user_id(name: Optional[str]) -> Optional[str]:
-    """
-    '田中(PM)' → '田中' 抜き出し → 環境変数マップで Slack ID に解決。
-    """
-    if not name:
-        return None
-    base = re.sub(r"\(.*?\)", "", name).strip()
-    m = _load_user_map()
-    return m.get(base)
-
-def schedule_task_reminders(channel: str, thread_ts: str, d: Draft):
-    """
-    各タスクについてリマインドをスケジュール。
-    - 期日の前日 10:00
-    - 期日 1時間前
-    投稿先：同スレッド。担当者Slack IDが分かればメンション付与。
-    """
-    tasks = parse_tasks_from_actions(d.actions)
-    if not tasks: 
-        return
-
-    for t in tasks:
-        due_dt = _parse_due_to_dt(t.get("due"))
-        if not due_dt:
-            continue
-
-        # 2回分の候補
-        dt_prev_day = (due_dt - timedelta(days=1)).replace(hour=DEFAULT_REMIND_HOUR, minute=0)
-        dt_one_hour = due_dt - timedelta(hours=1)
-
-        for when_dt in [dt_prev_day, dt_one_hour]:
-            post_at = _epoch(when_dt)
-            if not post_at: 
-                continue
-            # 過去はスキップ
-            now_epoch = int(datetime.now(_tz()).timestamp()) if _tz() else int(time.time())
-            if post_at <= now_epoch:
-                continue
-
-            mention = ""
-            uid = _resolve_slack_user_id(t.get("assignee"))
-            if uid:
-                mention = f"<@{uid}> "
-            text = (f"{mention}リマインド：*{t['title']}* "
-                    f"（担当: {t.get('assignee') or '未定'} / 期限: {t.get('due') or '未定'}）")
-
-            try:
-                client_slack.chat_scheduleMessage(
-                    channel=channel,
-                    text=text,
-                    post_at=post_at,
-                    thread_ts=thread_ts
-                )
-            except SlackApiError as e:
-                print(f"[Slack] scheduleMessage failed: {e}")
-
-# 注: post_slack_draft と build_edit_modal は services/slack_service.py からインポート済み
-
-# 注: save_json は utils/storage.py からインポート済み
+# 注: タスク関連の関数は services/task_service.py からインポート済み
 
 def _escape_html(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -1325,47 +1220,16 @@ async def slack_actions(request: Request, x_slack_signature: str = Header(defaul
                 task_draft_id, task_index = value.split(":", 1)
                 try:
                     task_index = int(task_index)
-                    # draft_idからDraftデータを取得
-                    task_draft_data = json.loads((SUMM_DIR / f"{task_draft_id}.json").read_text(encoding="utf-8"))
-                    task_d = Draft(**task_draft_data)
-                    # タスクリストを更新（完了マーク）
-                    tasks = parse_tasks_from_actions(task_d.actions)
-                    if 0 <= task_index < len(tasks):
-                        task = tasks[task_index]
+                    # タスクサービスを使用してタスクを完了状態にマーク
+                    task_d, updated_blocks = mark_task_complete(task_draft_id, task_index)
+                    if task_d and updated_blocks:
                         # メッセージを更新して完了状態を表示
                         channel = payload.get("channel", {}).get("id") or DEFAULT_SLACK_CHANNEL
                         message_ts = payload.get("message", {}).get("ts")
                         if channel and message_ts:
-                            # タスクリストブロックを更新
-                            updated_blocks = build_tasks_blocks(task_d, task_draft_id)
-                            # 該当タスクを完了状態に変更
-                            for block in updated_blocks:
-                                if block.get("type") == "section":
-                                    text = block.get("text", {}).get("text", "")
-                                    if f"☐ {task['title']}" in text or task['title'] in text:
-                                        # チェックボックスを完了に変更
-                                        block["text"]["text"] = text.replace("☐", "☑")
-                                        # 完了ボタンを無効化
-                                        if "accessory" in block:
-                                            block["accessory"] = {
-                                                "type": "button",
-                                                "text": {"type": "plain_text", "text": "完了済み"},
-                                                "style": "primary",
-                                                "value": value,
-                                                "action_id": "task_complete",
-                                                "disabled": True
-                                            }
-                            try:
-                                client_slack.chat_update(
-                                    channel=channel,
-                                    ts=message_ts,
-                                    blocks=updated_blocks,
-                                    text="アクションアイテム＆タスク"
-                                )
-                            except Exception as e:
-                                print(f"[Slack] Failed to update task block: {e}")
-                except (ValueError, IndexError, FileNotFoundError):
-                    pass
+                            update_task_block_in_slack(channel, message_ts, updated_blocks)
+                except (ValueError, IndexError) as e:
+                    print(f"[Task] Error processing task complete: {e}")
             return JSONResponse({"response_action": "clear"})
 
         if action_id == "approve":
